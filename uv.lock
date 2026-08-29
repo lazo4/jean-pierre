@@ -1,0 +1,18 @@
+version = 1
+revision = 3
+requires-python = ">=3.10"
+
+[manifest]
+members = [
+    "pyhebb",
+    "superhebb",
+]
+
+[[package]]
+name = "pyhebb"
+source = { editable = "crates/pyhebb" }
+
+[[package]]
+name = "superhebb"
+version = "0.1.0"
+source = { virtual = "." }

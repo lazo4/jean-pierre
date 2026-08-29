@@ -1,0 +1,6 @@
+[workspace]
+members = ["crates/superhebb_core", "crates/pyhebb"]
+resolver = "3"
+
+[workspace.dependencies]
+superhebb_core = { path = "crates/superhebb_core" }
