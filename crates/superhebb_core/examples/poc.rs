@@ -28,19 +28,30 @@ pub fn save_kernel(weights: &[i8], side_len: u32, display_size: u32, path: &str)
     scaled.save(path).unwrap();
 }
 
+const KERNELS: usize = 8;
+const INPUT_SIZE: usize = 1024;
+const KERNEL_SIZE: usize = 8;
+const KERNEL_STRIDE: usize = 2;
+const ACTIVATIONS_SIZE: usize = (INPUT_SIZE - KERNEL_SIZE) / KERNEL_STRIDE + 1;
+
 fn main() {
     // 8 pixel wide kernel with a stride of 2 over a 1024*1024 input
-    // (1024 - 8) / 2 + 1 = 509 ; 509^2 = 259081
+    // (1024 - 8) / 2 + 1 = 509 * 8 kernels
     // NOTE: Activations are always positive (due to relu)
-    let mut activations: Vec<u8> = vec![0; 259081];
+    let mut activations: Vec<u8> = vec![0; KERNELS * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE];
     let mut rng = rand::rng();
-    // 8*8 kernel w/ 1 filter and a single greyscale channel
-    let mut weights: Vec<i8> = (0..(8 * 8)).map(|_| rng.random_range(-10..10)).collect();
+    // 8*8 kernel w/ 8 filter and a single greyscale channel
+    let mut weights: Vec<i8> = (0..(KERNELS * KERNEL_SIZE * KERNEL_SIZE))
+        .map(|_| rng.random_range(-10..10))
+        .collect();
     println!("Weights: {:?}", weights);
-    let mut lat_weights: Vec<i8> = vec![0; 3 * 3];
-    let mut next_activations: Vec<u8> = vec![0; 259081];
-    let mut next_weights: Vec<i8> = vec![0; 8 * 8];
-    let mut next_lat_weights: Vec<i8> = vec![0; 3 * 3];
+    // Each kernel has a set of lateral weights
+    let mut lat_weights: Vec<i8> = vec![0; KERNELS * 3 * 3];
+    let mut cross_kernel_weights: Vec<i8> = vec![0; KERNELS * KERNELS];
+    let mut next_activations: Vec<u8> = vec![0; KERNELS * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE];
+    let mut next_weights: Vec<i8> = vec![0; KERNELS * KERNEL_SIZE * KERNEL_SIZE];
+    let mut next_lat_weights: Vec<i8> = vec![0; KERNELS * 3 * 3];
+    let mut next_cross_kernel_weights: Vec<i8> = vec![0; KERNELS * KERNELS];
 
     // Uncapped fps we'll see how fast we go.
     let mut frame_count = 0u64;
@@ -51,8 +62,9 @@ fn main() {
     // Use an image
     let file = image::open("assets/stripe.png").unwrap();
     let input: Vec<u8> = file.to_luma8().to_vec();
-    let mut delta_weights = vec![0; 8 * 8];
-    let mut delta_lat_weights = vec![0; 3 * 3];
+    let mut delta_weights = vec![0; KERNELS * KERNEL_SIZE * KERNEL_SIZE];
+    let mut delta_lat_weights = vec![0; KERNELS * 3 * 3];
+    let mut delta_cross_kernel_weights = vec![0; KERNELS * KERNELS];
 
     loop {
         // --- 1. Compute Tick ---
@@ -61,84 +73,165 @@ fn main() {
         // Calculate the activations
         // TODO: Optimize!!
         // TODO: Stop hardcoding stuff
-        for i in 0..509 {
-            for j in 0..509 {
-                // Compute the dot product of the input and the kernel
-                let mut sum = 0;
-                for k in 0..8 {
-                    for l in 0..8 {
-                        let input_value = input[(i * 2 + k) * 1024 + j * 2 + l];
-                        sum += input_value as i32 * weights[k * 8 + l] as i32;
-                    }
-                }
+        for kernel in 0..KERNELS {
+            for i in 0..ACTIVATIONS_SIZE {
+                for j in 0..ACTIVATIONS_SIZE {
+                    let mut sum = 0;
 
-                // Now calculate the lateral weights
-                for dx in 0..=2 {
-                    for dy in 0..=2 {
-                        if dx == 1 && dy == 1 {
-                            continue;
+                    // Handle the vertical weights
+                    for k in 0..KERNEL_SIZE {
+                        for l in 0..KERNEL_SIZE {
+                            let input_value =
+                                input[(i * KERNEL_STRIDE + k) * INPUT_SIZE + j * KERNEL_STRIDE + l];
+                            sum += input_value as i32
+                                * weights[kernel * KERNEL_SIZE * KERNEL_SIZE + k * KERNEL_SIZE + l]
+                                    as i32;
                         }
-                        let input = activations[(i + dx).saturating_sub(1).min(508) * 509
-                            + (j + dy).saturating_sub(1).min(508)];
-                        let weight = lat_weights[dx * 3 + dy];
+                    }
+
+                    // Now calculate the lateral weights
+                    for dx in 0..=2 {
+                        for dy in 0..=2 {
+                            if dx == 1 && dy == 1 {
+                                continue;
+                            }
+                            let input = activations[kernel * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE
+                                + (i + dx).saturating_sub(1).min(ACTIVATIONS_SIZE - 1)
+                                    * ACTIVATIONS_SIZE
+                                + (j + dy).saturating_sub(1).min(ACTIVATIONS_SIZE - 1)];
+                            let weight = lat_weights[kernel * 3 * 3 + dx * 3 + dy];
+                            sum += input as i32 * weight as i32;
+                        }
+                    }
+
+                    // Calculate the cross-kernel weights
+                    for source_kernel in 0..KERNELS {
+                        let input =
+                            activations[source_kernel * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE
+                                + i * ACTIVATIONS_SIZE
+                                + j];
+                        let weight = cross_kernel_weights[kernel * KERNELS + source_kernel];
                         sum += input as i32 * weight as i32;
                     }
+
+                    next_activations
+                        [kernel * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE + i * ACTIVATIONS_SIZE + j] =
+                        (sum >> 7).clamp(0, 255) as u8;
                 }
-                next_activations[i * 509 + j] = (sum >> 7).clamp(0, 255) as u8;
             }
         }
 
         // Now update the weights
-        for i in 0..509 {
-            for j in 0..509 {
-                for k in 0..8 {
-                    for l in 0..8 {
-                        let presynaptic = input[(i * 2 + k) * 1024 + j * 2 + l] as i32;
-                        let next_presynaptic = input[(i * 2 + k) * 1024 + j * 2 + l] as i32;
-                        let postsynaptic = next_activations[i * 509 + j] as i32;
-                        let prev_postsynaptic = activations[i * 509 + j] as i32;
-                        let delta =
-                            presynaptic * postsynaptic - next_presynaptic * prev_postsynaptic;
-                        delta_weights[k * 8 + l] += delta;
-                    }
-                }
-
-                // Now update the lateral weights
-                for dx in 0..=2 {
-                    for dy in 0..=2 {
-                        if dx == 1 && dy == 1 {
-                            continue;
+        for kernel in 0..KERNELS {
+            for i in 0..ACTIVATIONS_SIZE {
+                for j in 0..ACTIVATIONS_SIZE {
+                    for k in 0..KERNEL_SIZE {
+                        for l in 0..KERNEL_SIZE {
+                            let presynaptic = input
+                                [(i * KERNEL_STRIDE + k) * INPUT_SIZE + j * KERNEL_STRIDE + l]
+                                as i32;
+                            let next_presynaptic = input
+                                [(i * KERNEL_STRIDE + k) * INPUT_SIZE + j * KERNEL_STRIDE + l]
+                                as i32;
+                            let postsynaptic =
+                                next_activations[kernel * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE
+                                    + i * ACTIVATIONS_SIZE
+                                    + j] as i32;
+                            let prev_postsynaptic =
+                                activations[kernel * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE
+                                    + i * ACTIVATIONS_SIZE
+                                    + j] as i32;
+                            let delta =
+                                presynaptic * postsynaptic - next_presynaptic * prev_postsynaptic;
+                            delta_weights
+                                [kernel * KERNEL_SIZE * KERNEL_SIZE + k * KERNEL_SIZE + l] += delta;
                         }
-                        // Presynaptic neuron is always the current one
-                        let presynaptic = activations[i * 509 + j] as i32;
-                        let next_presynaptic = next_activations[i * 509 + j] as i32;
-                        let postsynaptic = next_activations[(i + dx).saturating_sub(1).min(508)
-                            * 509
-                            + (j + dy).saturating_sub(1).min(508)]
-                            as i32;
-                        let prev_postsynaptic = activations[(i + dx).saturating_sub(1).min(508)
-                            * 509
-                            + (j + dy).saturating_sub(1).min(508)]
-                            as i32;
+                    }
+
+                    // Now update the lateral weights
+                    for dx in 0..=2 {
+                        for dy in 0..=2 {
+                            if dx == 1 && dy == 1 {
+                                continue;
+                            }
+                            // Presynaptic neuron is always the current one
+                            let presynaptic =
+                                activations[kernel * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE
+                                    + i * ACTIVATIONS_SIZE
+                                    + j] as i32;
+                            let next_presynaptic =
+                                next_activations[kernel * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE
+                                    + i * ACTIVATIONS_SIZE
+                                    + j] as i32;
+                            let postsynaptic =
+                                next_activations[kernel * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE
+                                    + (i + dx).saturating_sub(1).min(ACTIVATIONS_SIZE - 1)
+                                        * ACTIVATIONS_SIZE
+                                    + (j + dy).saturating_sub(1).min(ACTIVATIONS_SIZE - 1)]
+                                    as i32;
+                            let prev_postsynaptic =
+                                activations[kernel * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE
+                                    + (i + dx).saturating_sub(1).min(ACTIVATIONS_SIZE - 1)
+                                        * ACTIVATIONS_SIZE
+                                    + (j + dy).saturating_sub(1).min(ACTIVATIONS_SIZE - 1)]
+                                    as i32;
+                            let delta =
+                                presynaptic * postsynaptic - next_presynaptic * prev_postsynaptic;
+                            delta_lat_weights[kernel * 3 * 3 + dx * 3 + dy] += delta;
+                        }
+                    }
+
+                    // Update the cross-kernel weights
+                    for source_kernel in 0..KERNELS {
+                        let presynaptic =
+                            activations[source_kernel * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE
+                                + i * ACTIVATIONS_SIZE
+                                + j] as i32;
+                        let next_presynaptic =
+                            next_activations[source_kernel * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE
+                                + i * ACTIVATIONS_SIZE
+                                + j] as i32;
+                        let postsynaptic =
+                            next_activations[kernel * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE
+                                + i * ACTIVATIONS_SIZE
+                                + j] as i32;
+                        let prev_postsynaptic =
+                            activations[kernel * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE
+                                + i * ACTIVATIONS_SIZE
+                                + j] as i32;
                         let delta =
                             presynaptic * postsynaptic - next_presynaptic * prev_postsynaptic;
-                        delta_lat_weights[dx * 3 + dy] += delta;
+                        delta_cross_kernel_weights[kernel * KERNELS + source_kernel] += delta;
                     }
                 }
             }
         }
 
-        for i in 0..8 {
-            for j in 0..8 {
-                next_weights[i * 8 + j] =
-                    weights[i * 8 + j] + ((delta_weights[i * 8 + j] >> 7) >> 9) as i8;
+        // Now apply the deltas
+        for kernel in 0..KERNELS {
+            for i in 0..KERNEL_SIZE {
+                for j in 0..KERNEL_SIZE {
+                    next_weights[kernel * KERNEL_SIZE * KERNEL_SIZE + i * KERNEL_SIZE + j] = weights
+                        [kernel * KERNEL_SIZE * KERNEL_SIZE + i * KERNEL_SIZE + j]
+                        + ((delta_weights
+                            [kernel * KERNEL_SIZE * KERNEL_SIZE + i * KERNEL_SIZE + j]
+                            >> 7)
+                            >> 9) as i8;
+                }
             }
-        }
 
-        for dx in 0..=2 {
-            for dy in 0..=2 {
-                next_lat_weights[dx * 3 + dy] =
-                    lat_weights[dx * 3 + dy] + ((delta_lat_weights[dx * 3 + dy] >> 7) >> 9) as i8;
+            for dx in 0..=2 {
+                for dy in 0..=2 {
+                    next_lat_weights[kernel * 3 * 3 + dx * 3 + dy] = lat_weights
+                        [kernel * 3 * 3 + dx * 3 + dy]
+                        + ((delta_lat_weights[kernel * 3 * 3 + dx * 3 + dy] >> 7) >> 9) as i8;
+                }
+            }
+            for source_kernel in 0..KERNELS {
+                next_cross_kernel_weights[kernel * KERNELS + source_kernel] = cross_kernel_weights
+                    [kernel * KERNELS + source_kernel]
+                    + ((delta_cross_kernel_weights[kernel * KERNELS + source_kernel] >> 7) >> 9)
+                        as i8;
             }
         }
 
@@ -146,6 +239,11 @@ fn main() {
         std::mem::swap(&mut activations, &mut next_activations);
         std::mem::swap(&mut weights, &mut next_weights);
         std::mem::swap(&mut lat_weights, &mut next_lat_weights);
+        std::mem::swap(&mut cross_kernel_weights, &mut next_cross_kernel_weights);
+        // Zero out the delta buffers
+        delta_weights.fill(0);
+        delta_lat_weights.fill(0);
+        delta_cross_kernel_weights.fill(0);
 
         // --- 3. FPS Counter ---
         frame_count += 1;
@@ -161,25 +259,33 @@ fn main() {
         }
         if total_frames % 500 == 0 {
             println!("Saving images");
-            save_activations(
-                &activations,
-                format!("weights/output_activations_{:.2}.png", total_frames).as_str(),
-            );
+            for kernel in 0..8 {
+                save_activations(
+                    &activations[kernel * 509 * 509..(kernel + 1) * 509 * 509],
+                    format!("weights/output_activations{kernel}_{}.png", total_frames).as_str(),
+                );
 
-            // Upscale 8x8 weights to 256x256 for easy viewing
+                // Upscale 8x8 weights to 256x256 for easy viewing
+                save_kernel(
+                    &weights[kernel * 64..(kernel + 1) * 64],
+                    8,
+                    256,
+                    format!("weights/output_weights{kernel}_{}.png", total_frames).as_str(),
+                );
+
+                // Upscale 3x3 lateral weights to 192x192
+                save_kernel(
+                    &lat_weights[kernel * 9..(kernel + 1) * 9],
+                    3,
+                    192,
+                    format!("weights/output_lat_weights{kernel}_{}.png", total_frames).as_str(),
+                );
+            }
             save_kernel(
-                &weights,
-                8,
+                &cross_kernel_weights,
+                KERNELS as u32,
                 256,
-                format!("weights/output_weights_{:.2}.png", total_frames).as_str(),
-            );
-
-            // Upscale 3x3 lateral weights to 192x192
-            save_kernel(
-                &lat_weights,
-                3,
-                192,
-                format!("weights/output_lat_weights_{:.2}.png", total_frames).as_str(),
+                format!("weights/output_cross_weights_{}.png", total_frames).as_str(),
             );
         }
     }
