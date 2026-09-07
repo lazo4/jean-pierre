@@ -7,8 +7,7 @@ use image::{
 use pollster::FutureExt;
 use rand::RngExt;
 use wgpu::{
-    BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BufferDescriptor, BufferUsages,
-    ComputePipelineDescriptor, Extent3d, Instance, ShaderModuleDescriptor,
+    BufferUsages, ComputePipelineDescriptor, Extent3d, Instance, Origin3d, ShaderModuleDescriptor,
 };
 
 use rand::Rng;
@@ -46,10 +45,11 @@ impl<T: Rng> SaccadeGenerator<T> {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct FrameParams {
     width: u32,
     height: u32,
-    epsilon: f32,
     saccade_x: f32,
     saccade_y: f32,
 }
@@ -76,12 +76,6 @@ pub fn save_kernel(weights: &[i8], side_len: u32, display_size: u32, path: &str)
     scaled.save(path).unwrap();
 }
 
-const KERNELS: usize = 8;
-const INPUT_SIZE: usize = 1024;
-const KERNEL_SIZE: usize = 8;
-const KERNEL_STRIDE: usize = 2;
-const ACTIVATIONS_SIZE: usize = (INPUT_SIZE - KERNEL_SIZE) / KERNEL_STRIDE + 1;
-
 fn main() {
     // Init the wgpu pipeline
     let instance = Instance::default();
@@ -105,11 +99,20 @@ fn main() {
         source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
     });
 
-    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+    let micro_tick_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
         label: Some("Compute pipe"),
         layout: None,
         module: &shader,
-        entry_point: None,
+        entry_point: Some("preprocess_frame"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    let epsilon_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("Epsilon pipe"),
+        layout: None,
+        module: &shader,
+        entry_point: Some("update_epsilon"),
         compilation_options: Default::default(),
         cache: None,
     });
@@ -143,7 +146,7 @@ fn main() {
 
     let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Output Buffer"),
-        size: 1024 * 1024 / 8,
+        size: 1024 * 1024 / 4,
         usage: BufferUsages::COPY_DST | BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
@@ -151,14 +154,7 @@ fn main() {
     let spike_counter = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Spike Counter"),
         size: 32,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-
-    let staging_spike_counter = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Staging Spike Counter"),
-        size: 32,
-        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
 
@@ -169,9 +165,16 @@ fn main() {
         mapped_at_creation: false,
     });
 
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let epsilon_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Epsilon Buffer"),
+        size: 4,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let micro_tick_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Bind group"),
-        layout: &pipeline.get_bind_group_layout(0),
+        layout: &micro_tick_pipeline.get_bind_group_layout(0),
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -193,35 +196,108 @@ fn main() {
                 binding: 4,
                 resource: params_buf.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: epsilon_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let epsilon_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Epsilon Bind group"),
+        layout: &epsilon_pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: spike_counter.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: epsilon_buf.as_entire_binding(),
+            },
         ],
     });
 
     // Run the game loop
     let mut iteration_count = 0;
+    let mut micro_iteration_count = 0;
     // Uncapped fps we'll see how fast we go.
     let mut frame_count = 0u64;
+    let mut micro_frame_count = 0u64;
     let mut last_fps_check = Instant::now();
 
     let static_image = image::open("assets/stairs.jpg").unwrap();
     let input_image_raw = static_image.to_rgba8().into_raw();
 
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &input_frame_texture,
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: Default::default(),
+        },
+        &input_image_raw,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(1024 * 4),
+            rows_per_image: None,
+        },
+        Extent3d {
+            width: 1024,
+            height: 1024,
+            depth_or_array_layers: 1,
+        },
+    );
+
     let mut saccade_generator = SaccadeGenerator::new(rand::rng());
 
     loop {
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Compute encoder"),
-        });
+        // TODO: Update frames here etc...
 
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: None,
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(64, 64, 2);
-        drop(pass);
+        // Run the microtick iterations
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+        for _ in 0..10 {
+            let (saccade_x, saccade_y) = saccade_generator.update();
+            let params = FrameParams {
+                width: 1024,
+                height: 1024,
+                saccade_x,
+                saccade_y,
+            };
+
+            queue.write_buffer(&params_buf, 0, bytemuck::bytes_of(&params));
+
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Micro tick pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&micro_tick_pipeline);
+            pass.set_bind_group(0, &micro_tick_group, &[]);
+            pass.dispatch_workgroups(4, 1024, 1);
+            drop(pass);
+
+            // Update epsilon
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Epsilon pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&epsilon_pipeline);
+            pass.set_bind_group(0, &epsilon_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+            drop(pass);
+
+            micro_iteration_count += 1;
+            micro_frame_count += 1;
+        }
+
+        // NOTE: If we want to map any buffers, do so here
 
         queue.submit(Some(encoder.finish()));
+
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+
         // --- 3. FPS Counter ---
         frame_count += 1;
         iteration_count += 1;
@@ -229,12 +305,13 @@ fn main() {
 
         if elapsed.as_secs_f64() >= 1.0 {
             let fps = frame_count as f64 / elapsed.as_secs_f64();
+            let micro_fps = micro_frame_count as f64 / elapsed.as_secs_f64();
             println!(
-                "Performance: {:.2} FPS, iterations: {}",
-                fps, iteration_count
+                "Performance: {fps:.2} FPS, Micro: {micro_fps:.2} FPS, iterations: {iteration_count}, micro_iterations: {micro_iteration_count}",
             );
             //
             frame_count = 0;
+            micro_frame_count = 0;
             last_fps_check = Instant::now();
         }
     }

@@ -1,7 +1,6 @@
 struct FrameParams {
     width: u32,
     height: u32,
-    epsilon: f32,
     saccade_x: f32,
     saccade_y: f32,
 };
@@ -11,6 +10,7 @@ struct FrameParams {
 @group(0) @binding(2) var<storage, read_write> output: array<u32>;
 @group(0) @binding(3) var<storage, read_write> spike_counter: atomic<u32>;
 @group(0) @binding(4) var<uniform> params: FrameParams;
+@group(0) @binding(5) var<storage, read_write> epsilon: f32;
 
 fn get_luminance(coords: vec2f) -> f32 {
     let jittered_pos = coords + vec2f(params.saccade_x, params.saccade_y);
@@ -53,8 +53,8 @@ fn preprocess_frame(
 
     // Now shift by SIMD lane id
 
-    let is_on = u32(diff > params.epsilon) << lane_id;
-    let is_off = u32(diff < -params.epsilon) << lane_id;
+    let is_on = u32(diff > epsilon) << lane_id;
+    let is_off = u32(diff < -epsilon) << lane_id;
 
     let word_on = subgroupOr(is_on);
     let word_off = subgroupOr(is_off);
@@ -73,3 +73,18 @@ fn preprocess_frame(
     }
 }
 
+const SPIKE: f32 = 1e-6;
+const DECAY: f32 = 1e-8;
+const TOTAL_NEURONS: u32 = 1024 * 1024 * 2;
+
+@compute @workgroup_size(1, 1, 1)
+fn update_epsilon() {
+    // Read total spikes AND reset counter to 0 in 1 atomic operation!
+    let total_spikes = atomicExchange(&spike_counter, 0u);
+
+    let zeros = f32(TOTAL_NEURONS - total_spikes);
+    let delta = (f32(total_spikes) * SPIKE) - (zeros * DECAY);
+
+    // Update GPU epsilon directly
+    epsilon = clamp(epsilon + delta, 0.0, 1.0);
+}
