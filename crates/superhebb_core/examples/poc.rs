@@ -4,11 +4,55 @@ use image::{
     GrayImage,
     imageops::{FilterType, resize},
 };
+use pollster::FutureExt;
 use rand::RngExt;
-use rayon::{
-    iter::{IndexedParallelIterator, ParallelIterator},
-    slice::ParallelSliceMut,
+use wgpu::{
+    BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BufferDescriptor, BufferUsages,
+    ComputePipelineDescriptor, Extent3d, Instance, ShaderModuleDescriptor,
 };
+
+use rand::Rng;
+
+pub struct SaccadeGenerator<T: Rng> {
+    pub x: f32,
+    pub y: f32,
+    decay: f32,     // Restoring force toward center (0.0, 0.0)
+    step_size: f32, // Drift velocity scale (sub-pixel)
+    rng: T,
+}
+
+impl<T: Rng> SaccadeGenerator<T> {
+    pub fn new(rng: T) -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            decay: 0.85,     // Pulls back to center each tick
+            step_size: 0.15, // Max ~0.15 pixel step per frame
+            rng,
+        }
+    }
+
+    /// Call this every game loop frame tick (e.g., at 60 FPS)
+    pub fn update(&mut self) -> (f32, f32) {
+        // 1. Add random Gaussian-like step
+        let dx: f32 = self.rng.random_range(-self.step_size..self.step_size);
+        let dy: f32 = self.rng.random_range(-self.step_size..self.step_size);
+
+        // 2. Apply step + decay (prevents the image from drifting off to infinity)
+        self.x = (self.x + dx) * self.decay;
+        self.y = (self.y + dy) * self.decay;
+
+        (self.x, self.y)
+    }
+}
+
+struct FrameParams {
+    width: u32,
+    height: u32,
+    epsilon: f32,
+    saccade_x: f32,
+    saccade_y: f32,
+}
 
 /// Maps i8 (-128..=127) buffer to u8 (0..=255) for grayscale imaging
 fn i8_to_u8_buffer(data: &[i8]) -> Vec<u8> {
@@ -39,266 +83,159 @@ const KERNEL_STRIDE: usize = 2;
 const ACTIVATIONS_SIZE: usize = (INPUT_SIZE - KERNEL_SIZE) / KERNEL_STRIDE + 1;
 
 fn main() {
-    // 8 pixel wide kernel with a stride of 2 over a 1024*1024 input
-    // (1024 - 8) / 2 + 1 = 509 * 8 kernels
-    // NOTE: Activations are always positive (due to relu)
-    let mut activations: Vec<u8> = vec![0; KERNELS * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE];
-    let mut rng = rand::rng();
-    // 8*8 kernel w/ 8 filter and a single greyscale channel
-    let mut weights: Vec<i8> = (0..(KERNELS * KERNEL_SIZE * KERNEL_SIZE))
-        .map(|_| rng.random_range(-10..10))
-        .collect();
-    println!("Weights: {:?}", weights);
-    // Each kernel has a set of lateral weights
-    let mut lat_weights: Vec<i8> = vec![0; KERNELS * 3 * 3];
-    let mut cross_kernel_weights: Vec<i8> = vec![0; KERNELS * KERNELS];
-    let mut next_activations: Vec<u8> = vec![0; KERNELS * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE];
-    let mut next_weights: Vec<i8> = vec![0; KERNELS * KERNEL_SIZE * KERNEL_SIZE];
-    let mut next_lat_weights: Vec<i8> = vec![0; KERNELS * 3 * 3];
-    let mut next_cross_kernel_weights: Vec<i8> = vec![0; KERNELS * KERNELS];
+    // Init the wgpu pipeline
+    let instance = Instance::default();
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions::default())
+        .block_on()
+        .unwrap();
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            label: None,
+            required_features: wgpu::Features::SUBGROUP,
+            required_limits: Default::default(),
+            experimental_features: Default::default(),
+            memory_hints: Default::default(),
+            trace: Default::default(),
+        })
+        .block_on()
+        .unwrap();
+    let shader = device.create_shader_module(ShaderModuleDescriptor {
+        label: None,
+        source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+    });
 
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("Compute pipe"),
+        layout: None,
+        module: &shader,
+        entry_point: None,
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    let input_frame_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Input frame texture"),
+        size: Extent3d {
+            width: 1024,
+            height: 1024,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+
+    let input_frame_view =
+        input_frame_texture.create_view(&wgpu::wgt::TextureViewDescriptor::default());
+
+    let input_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("Input Sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+
+    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Output Buffer"),
+        size: 1024 * 1024 / 8,
+        usage: BufferUsages::COPY_DST | BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+
+    let spike_counter = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Spike Counter"),
+        size: 32,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    let staging_spike_counter = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Staging Spike Counter"),
+        size: 32,
+        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Params Buffer"),
+        size: std::mem::size_of::<FrameParams>() as u64,
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Bind group"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&input_frame_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&input_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: output_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: spike_counter.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: params_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    // Run the game loop
+    let mut iteration_count = 0;
     // Uncapped fps we'll see how fast we go.
     let mut frame_count = 0u64;
     let mut last_fps_check = Instant::now();
 
-    let mut total_frames = 0u64;
+    let static_image = image::open("assets/stairs.jpg").unwrap();
+    let input_image_raw = static_image.to_rgba8().into_raw();
 
-    // Use an image
-    let file = image::open("assets/tennis.jpg").unwrap();
-    let input: Vec<u8> = file.to_luma8().to_vec();
-    let mut delta_weights = vec![0; KERNELS * KERNEL_SIZE * KERNEL_SIZE];
-    let mut delta_lat_weights = vec![0; KERNELS * 3 * 3];
-    let mut delta_cross_kernel_weights = vec![0; KERNELS * KERNELS];
+    let mut saccade_generator = SaccadeGenerator::new(rand::rng());
 
     loop {
-        // --- 1. Compute Tick ---
-        // (Your activation and weight updates go here)
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Compute encoder"),
+        });
 
-        // Calculate the activations
-        // TODO: Optimize!!
-        next_activations
-            .par_chunks_exact_mut(ACTIVATIONS_SIZE * ACTIVATIONS_SIZE)
-            .enumerate()
-            .for_each(|(kernel, next_activations)| {
-                let kernel_weights = &weights
-                    [kernel * KERNEL_SIZE * KERNEL_SIZE..(kernel + 1) * KERNEL_SIZE * KERNEL_SIZE];
-                let kernel_lat_weights = &lat_weights[kernel * 3 * 3..(kernel + 1) * 3 * 3];
-                let kernel_cross_weights =
-                    &cross_kernel_weights[kernel * KERNELS..(kernel + 1) * KERNELS];
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: None,
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(64, 64, 2);
+        drop(pass);
 
-                for i in 0..ACTIVATIONS_SIZE {
-                    for j in 0..ACTIVATIONS_SIZE {
-                        let mut sum = 0;
-
-                        // Handle the vertical weights
-                        for k in 0..KERNEL_SIZE {
-                            for l in 0..KERNEL_SIZE {
-                                let input_value = input
-                                    [(i * KERNEL_STRIDE + k) * INPUT_SIZE + j * KERNEL_STRIDE + l];
-                                let weight = kernel_weights[k * KERNEL_SIZE + l];
-                                sum += input_value as i32 * weight as i32;
-                            }
-                        }
-
-                        // Calculate the lateral weights
-                        for dx in 0..=2 {
-                            for dy in 0..=2 {
-                                if dx == 1 && dy == 1 {
-                                    continue;
-                                }
-                                let input =
-                                    activations[kernel * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE
-                                        + (i + dx).saturating_sub(1).min(ACTIVATIONS_SIZE - 1)
-                                            * ACTIVATIONS_SIZE
-                                        + (j + dy).saturating_sub(1).min(ACTIVATIONS_SIZE - 1)];
-                                let weight = kernel_lat_weights[dx * 3 + dy];
-                                sum += input as i32 * weight as i32;
-                            }
-                        }
-
-                        // Calculate the cross-kernel weights
-                        for source_kernel in 0..KERNELS {
-                            let input =
-                                activations[source_kernel * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE
-                                    + i * ACTIVATIONS_SIZE
-                                    + j];
-                            let weight = kernel_cross_weights[source_kernel];
-                            sum += input as i32 * weight as i32;
-                        }
-
-                        next_activations[i * ACTIVATIONS_SIZE + j] = (sum >> 7).clamp(0, 255) as u8;
-                    }
-                }
-            });
-
-        // Now update the weights
-        //
-        delta_weights
-            .par_chunks_exact_mut(KERNEL_SIZE * KERNEL_SIZE)
-            .zip(delta_lat_weights.par_chunks_exact_mut(3 * 3))
-            .zip(delta_cross_kernel_weights.par_chunks_exact_mut(KERNELS))
-            .enumerate()
-            .for_each(|(kernel, ((weights, lat_weights), cross_weights))| {
-                let kernel_activations = &activations[kernel * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE
-                    ..(kernel + 1) * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE];
-                let next_kernel_activations =
-                    &next_activations[kernel * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE
-                        ..(kernel + 1) * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE];
-
-                for i in 0..ACTIVATIONS_SIZE {
-                    for j in 0..ACTIVATIONS_SIZE {
-                        // Update the vertical weights
-                        for k in 0..KERNEL_SIZE {
-                            for l in 0..KERNEL_SIZE {
-                                let presynaptic = input
-                                    [(i * KERNEL_STRIDE + k) * INPUT_SIZE + j * KERNEL_STRIDE + l]
-                                    as i32;
-                                let next_presynaptic = input
-                                    [(i * KERNEL_STRIDE + k) * INPUT_SIZE + j * KERNEL_STRIDE + l]
-                                    as i32;
-                                let postsynaptic =
-                                    next_kernel_activations[i * ACTIVATIONS_SIZE + j] as i32;
-                                let prev_postsynaptic =
-                                    kernel_activations[i * ACTIVATIONS_SIZE + j] as i32;
-                                let delta = presynaptic * postsynaptic
-                                    - next_presynaptic * prev_postsynaptic;
-                                weights[k * KERNEL_SIZE + l] += delta;
-                            }
-                        }
-
-                        // Update the lateral weights
-                        for dx in 0..=2 {
-                            for dy in 0..=2 {
-                                if dx == 1 && dy == 1 {
-                                    continue;
-                                }
-
-                                // Presynaptic neuron is always the current one
-                                let presynaptic =
-                                    kernel_activations[i * ACTIVATIONS_SIZE + j] as i32;
-                                let next_presynaptic =
-                                    next_kernel_activations[i * ACTIVATIONS_SIZE + j] as i32;
-                                let postsynaptic = next_kernel_activations[(i + dx)
-                                    .saturating_sub(1)
-                                    .min(ACTIVATIONS_SIZE - 1)
-                                    * ACTIVATIONS_SIZE
-                                    + (j + dy).saturating_sub(1).min(ACTIVATIONS_SIZE - 1)]
-                                    as i32;
-                                let prev_postsynaptic = kernel_activations[(i + dx)
-                                    .saturating_sub(1)
-                                    .min(ACTIVATIONS_SIZE - 1)
-                                    * ACTIVATIONS_SIZE
-                                    + (j + dy).saturating_sub(1).min(ACTIVATIONS_SIZE - 1)]
-                                    as i32;
-                                let delta = presynaptic * postsynaptic
-                                    - next_presynaptic * prev_postsynaptic;
-                                lat_weights[dx * 3 + dy] += delta;
-                            }
-                        }
-
-                        // Update the cross-kernel weights
-                        for source_kernel in 0..KERNELS {
-                            let presynaptic =
-                                activations[source_kernel * ACTIVATIONS_SIZE * ACTIVATIONS_SIZE
-                                    + i * ACTIVATIONS_SIZE
-                                    + j] as i32;
-                            let next_presynaptic = next_activations[source_kernel
-                                * ACTIVATIONS_SIZE
-                                * ACTIVATIONS_SIZE
-                                + i * ACTIVATIONS_SIZE
-                                + j] as i32;
-                            let postsynaptic =
-                                next_kernel_activations[i * ACTIVATIONS_SIZE + j] as i32;
-                            let prev_postsynaptic =
-                                kernel_activations[i * ACTIVATIONS_SIZE + j] as i32;
-                            let delta =
-                                presynaptic * postsynaptic - next_presynaptic * prev_postsynaptic;
-                            cross_weights[source_kernel] += delta;
-                        }
-                    }
-                }
-            });
-
-        // Now apply the deltas
-        for kernel in 0..KERNELS {
-            for i in 0..KERNEL_SIZE {
-                for j in 0..KERNEL_SIZE {
-                    next_weights[kernel * KERNEL_SIZE * KERNEL_SIZE + i * KERNEL_SIZE + j] = weights
-                        [kernel * KERNEL_SIZE * KERNEL_SIZE + i * KERNEL_SIZE + j]
-                        + ((delta_weights
-                            [kernel * KERNEL_SIZE * KERNEL_SIZE + i * KERNEL_SIZE + j]
-                            >> 7)
-                            >> 9) as i8;
-                }
-            }
-
-            for dx in 0..=2 {
-                for dy in 0..=2 {
-                    next_lat_weights[kernel * 3 * 3 + dx * 3 + dy] = lat_weights
-                        [kernel * 3 * 3 + dx * 3 + dy]
-                        + ((delta_lat_weights[kernel * 3 * 3 + dx * 3 + dy] >> 7) >> 9) as i8;
-                }
-            }
-            for source_kernel in 0..KERNELS {
-                next_cross_kernel_weights[kernel * KERNELS + source_kernel] = cross_kernel_weights
-                    [kernel * KERNELS + source_kernel]
-                    + ((delta_cross_kernel_weights[kernel * KERNELS + source_kernel] >> 7) >> 9)
-                        as i8;
-            }
-        }
-
-        // --- 2. Dual Buffer Swap ---
-        std::mem::swap(&mut activations, &mut next_activations);
-        std::mem::swap(&mut weights, &mut next_weights);
-        std::mem::swap(&mut lat_weights, &mut next_lat_weights);
-        std::mem::swap(&mut cross_kernel_weights, &mut next_cross_kernel_weights);
-        // Zero out the delta buffers
-        delta_weights.fill(0);
-        delta_lat_weights.fill(0);
-        delta_cross_kernel_weights.fill(0);
-
+        queue.submit(Some(encoder.finish()));
         // --- 3. FPS Counter ---
         frame_count += 1;
-        total_frames += 1;
+        iteration_count += 1;
         let elapsed = last_fps_check.elapsed();
 
         if elapsed.as_secs_f64() >= 1.0 {
             let fps = frame_count as f64 / elapsed.as_secs_f64();
-            println!("Performance: {:.2} FPS, iterations: {}", fps, total_frames);
-
+            println!(
+                "Performance: {:.2} FPS, iterations: {}",
+                fps, iteration_count
+            );
+            //
             frame_count = 0;
             last_fps_check = Instant::now();
-        }
-        if total_frames % 500 == 0 {
-            println!("Saving images");
-            for kernel in 0..8 {
-                save_activations(
-                    &activations[kernel * 509 * 509..(kernel + 1) * 509 * 509],
-                    format!("weights/output_activations{kernel}_{}.png", total_frames).as_str(),
-                );
-
-                // Upscale 8x8 weights to 256x256 for easy viewing
-                save_kernel(
-                    &weights[kernel * 64..(kernel + 1) * 64],
-                    8,
-                    256,
-                    format!("weights/output_weights{kernel}_{}.png", total_frames).as_str(),
-                );
-
-                // Upscale 3x3 lateral weights to 192x192
-                save_kernel(
-                    &lat_weights[kernel * 9..(kernel + 1) * 9],
-                    3,
-                    192,
-                    format!("weights/output_lat_weights{kernel}_{}.png", total_frames).as_str(),
-                );
-            }
-            save_kernel(
-                &cross_kernel_weights,
-                KERNELS as u32,
-                256,
-                format!("weights/output_cross_weights_{}.png", total_frames).as_str(),
-            );
         }
     }
 }
