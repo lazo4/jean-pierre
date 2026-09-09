@@ -45,6 +45,7 @@ fn preprocess_frame(
 
     for (var dy = -1; dy <= 1; dy++) {
         for (var dx = -1; dx <= 1; dx++) {
+            // if dx == 0 && dy == 0 { continue; }
             surround_sum += get_luminance(coords + vec2f(f32(dx), f32(dy)));
         }
     }
@@ -73,8 +74,8 @@ fn preprocess_frame(
     }
 }
 
-const SPIKE: f32 = 1e-6;
-const DECAY: f32 = 1e-8;
+const DECAY: f32 = 0.0001;  // Smooth threshold decrease rate
+const SPIKE: f32 = 0.0019;  // 19 * DECAY -> 5% steady-state density
 const TOTAL_NEURONS: u32 = 1024 * 1024 * 2;
 
 @compute @workgroup_size(1, 1, 1)
@@ -82,9 +83,11 @@ fn update_epsilon() {
     // Read total spikes AND reset counter to 0 in 1 atomic operation!
     let total_spikes = atomicExchange(&spike_counter, 0u);
 
-    let zeros = f32(TOTAL_NEURONS - total_spikes);
-    let delta = (f32(total_spikes) * SPIKE) - (zeros * DECAY);
+    // Express spikes as a 0.0 to 1.0 rate
+    let spike_rate = f32(total_spikes) / f32(TOTAL_NEURONS);
+    let zero_rate = 1.0 - spike_rate;
 
+    let delta = (spike_rate * SPIKE) - (zero_rate * DECAY);
     // Update GPU epsilon directly
     epsilon = clamp(epsilon + delta, 0.0, 1.0);
 }
