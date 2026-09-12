@@ -21,7 +21,7 @@ def center_crop_square(frame, target_size=1024):
 snn = VisionSNN()
 
 # Continuity Camera capture (0 or 1 depending on built-in Mac webcam setup)
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(1)
 
 fps_counter = 0
 last_time = time.time()

@@ -7,7 +7,8 @@ struct FrameParams {
 
 @group(0) @binding(0) var raw_frame: texture_2d<f32>;
 @group(0) @binding(1) var input_sampler: sampler;
-@group(0) @binding(2) var<storage, read_write> output: array<u32>;
+// Channel packed, so even channels have ON bits and odd channels have OFF bits
+@group(0) @binding(2) var<storage, read_write> layer1_input: array<u32>;
 @group(0) @binding(3) var<storage, read_write> spike_counter: atomic<u32>;
 @group(0) @binding(4) var<uniform> params: FrameParams;
 @group(0) @binding(5) var<storage, read_write> epsilon: f32;
@@ -32,7 +33,6 @@ fn preprocess_frame(
     @builtin(global_invocation_id) global_id: vec3u,
     @builtin(subgroup_invocation_id) lane_id: u32,
 ) {
-    // Touch the varibales to keep them in the layout
     let x = global_id.x;
     let y = global_id.y;
 
@@ -64,8 +64,8 @@ fn preprocess_frame(
         let words_per_row = params.width / 32u;
         let row_offset = x / 32u;
         let word_index = (y * words_per_row + row_offset) * 2u;
-        output[word_index] = word_on;
-        output[word_index + 1] = word_off;
+        layer1_input[word_index] = word_on;
+        layer1_input[word_index + 1] = word_off;
 
         let spike_count = countOneBits(word_on) + countOneBits(word_off);
         if spike_count > 0u {
@@ -91,3 +91,76 @@ fn update_epsilon() {
     // Update GPU epsilon directly
     epsilon = clamp(epsilon + delta, 0.0, 1.0);
 }
+
+// Activations for layer 1
+// Indexed by y * 8 * params.width / 32 + x * 8 / 32 + kernel 
+@group(0) @binding(6) var<storage, read_write> layer1_activations: array<u32>;
+@group(0) @binding(7) var<storage, read_write> layer1_next_activations: array<u32>;
+@group(0) @binding(8) var<storage, read_write> layer1_vertical_weights: array<u32>;
+@group(0) @binding(9) var<storage, read_write> layer1_next_vertical_weights: array<u32>;
+@group(0) @binding(10) var<storage, read_write> layer1_vertical_deltas: array<u32>;
+@group(0) @binding(11) var<storage, read_write> layer1_epsilon: array<u32>;
+
+fn get_weight(is_off: bool, kernel: u32, row: u32, bit_idx: u32) -> u32 {
+    // 1. Calculate linear byte offset (0..1023)
+    let byte_idx = select(0u, 512u, is_off) + kernel * 8 * 8 + row * 8 + bit_idx;
+
+    let word_idx = byte_idx / 4;          // byte_idx / 4
+    let bit_offset = (byte_idx % 4) * 8u;    // (byte_idx % 4) * 8
+
+    // 3. Single clock cycle hardware bitfield extraction
+    return extractBits(layer1_vertical_weights[word_idx], bit_offset, 8u);
+}
+
+fn get_input_word(is_off: bool, x: u32, y: u32) -> u32 {
+    let word_idx = (y * params.width / 32u + x / 32u) * 2u + select(0u, 1u, is_off);
+    return layer1_input[word_idx];
+}
+
+// Compute the inference pass of the V1 exploiting the power of subgroups
+@compute @workgroup_size(256, 1, 1)
+fn inference(
+    @builtin(global_invocation_id) global_id: vec3u,
+    @builtin(subgroup_invocation_id) lane_id: u32,
+) {
+    // Each thread processes 1 neuron 
+    // Each subgroup processes 32 neurons = 1 word worth of activations, accumulated through subgroupBallot
+
+    let kernel = global_id.z;
+
+    // The current sum of all the active weights
+    // This will be thresholded in the end
+    var sum: i32 = 0;
+
+    // Start by computing the vertical weights
+    // Iterate over the rows
+    for (var row = 0u; row < 8; row++) {
+        // Extract the relevant input bits
+        let input_word = get_input_word(false, global_id.x, global_id.y + row);
+        let next_input_word = get_input_word(true, global_id.x + 1, global_id.y + row);
+
+        let low_bits = input_word >> lane_id;
+        let high_bits = select(0, next_input_word << (32 - lane_id), lane_id > 24);
+
+        let input_bits = (low_bits | high_bits) & 0xFF;
+
+        // Now and and shift for each bitplane
+        // NOTE: Since the weights are signed, bit 7 is treated specially
+        for (var bitplane = 0u; bitplane < 7; bitplane++) {
+            let weight = get_weight(false, kernel, row, bitplane);
+            sum += i32(countOneBits(input_bits & weight) << bitplane);
+        }
+        // The rest of the numbers must be sign extended (subtracted)
+        let weight = get_weight(false, kernel, row, 7);
+        sum -= i32(countOneBits(input_bits & weight) << 7);
+    }
+
+    let activation = subgroupBallot(sum > layer1_epsilon).x;
+
+    // Write the activation (once per subgroup)
+    if lane_id == 0u {
+        let out_idx = 0;
+        layer1_next_activations[out_idx] = activation;
+    }
+}
+
