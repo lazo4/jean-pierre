@@ -80,6 +80,33 @@ pub fn decode_spike_words(words: &[u32], width: u32, height: u32) -> GrayImage {
     img
 }
 
+pub fn decode_activations(
+    words: &[u32],
+    width: u32,
+    height: u32,
+    kernels: u32,
+    target_kernel: u32,
+) -> GrayImage {
+    let mut img = GrayImage::new(width, height);
+    let words_per_row = width * kernels / 32;
+
+    for y in 0..height {
+        for x in 0..width {
+            let word_idx = (((y * words_per_row + x) * kernels + target_kernel) / 32) as usize;
+            let bit_idx = x % 32;
+
+            let word = words[word_idx];
+
+            let spike = (word & (1 << bit_idx)) != 0;
+
+            let pixel_val = if spike { 255 } else { 0 };
+            img.put_pixel(x, y, image::Luma([pixel_val]));
+        }
+    }
+
+    img
+}
+
 pub struct VisionSNN {
     pub instance: Instance,
     pub adapter: wgpu::Adapter,
@@ -100,6 +127,7 @@ pub struct VisionSNN {
     pub pong_bind_group: wgpu::BindGroup,
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub staging_output: wgpu::Buffer,
+    pub staging_layer1_activations: wgpu::Buffer,
     pub layer1_activations: wgpu::Buffer,
     pub layer1_next_activations: wgpu::Buffer,
     pub layer1_vertical_weights: wgpu::Buffer,
@@ -319,7 +347,7 @@ impl VisionSNN {
         });
         let epsilon_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Epsilon Buffer"),
-            size: 4,
+            size: 4 * 2,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -340,7 +368,7 @@ impl VisionSNN {
 
         let layer1_vertical_weights = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Layer 1 Vertical Weights"),
-            // 8 rows, 8 columns / 8 bits per row, 8 kernels, 8 bitplanes, 2 input channels
+            // 2 input channels 8 rows, 8 columns, 8 kernels
             size: 8 * 8 * 8 * 2,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -471,6 +499,13 @@ impl VisionSNN {
             mapped_at_creation: false,
         });
 
+        let staging_layer1_activations = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Staging Layer 1 Activations"),
+            size: (1024 * 1024) as u64, // 262,144 bytes
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
         Self {
             instance,
             adapter,
@@ -488,6 +523,7 @@ impl VisionSNN {
             params_buf,
             epsilon_buf,
             staging_output,
+            staging_layer1_activations,
             ping_bind_group,
             pong_bind_group,
             bind_group_layout,
@@ -502,7 +538,13 @@ impl VisionSNN {
     }
 
     /// Run microticks with the given input frame
-    pub fn run_micro_ticks(&mut self, input_frame: &[u8], micro_ticks: u32, out: &mut [u8]) {
+    pub fn run_micro_ticks(
+        &mut self,
+        input_frame: &[u8],
+        micro_ticks: u32,
+        retina_out: &mut [u8],
+        layer1_out: &mut [u8],
+    ) {
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.input_frame_texture,
@@ -562,7 +604,7 @@ impl VisionSNN {
             // Inference pass
             pass.set_pipeline(&self.layer1_inference_pipeline);
             pass.set_bind_group(0, bind_group, &[]);
-            pass.dispatch_workgroups(1024 * 1024 / 32, 1, 1);
+            pass.dispatch_workgroups(1024 / 256, 1024, 8);
 
             drop(pass);
 
@@ -575,7 +617,20 @@ impl VisionSNN {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
         encoder.copy_buffer_to_buffer(&self.layer1_input, 0, &self.staging_output, 0, None);
+        encoder.copy_buffer_to_buffer(
+            &self.layer1_next_activations,
+            0,
+            &self.staging_layer1_activations,
+            0,
+            None,
+        );
         encoder.map_buffer_on_submit(&self.staging_output, wgpu::MapMode::Read, .., |_| {});
+        encoder.map_buffer_on_submit(
+            &self.staging_layer1_activations,
+            wgpu::MapMode::Read,
+            ..,
+            |_| {},
+        );
         self.queue.submit(Some(encoder.finish()));
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
@@ -588,8 +643,19 @@ impl VisionSNN {
             decode_spike_words(words, 1024, 1024).to_vec()
         };
 
-        self.staging_output.unmap();
+        let layer1_activations = {
+            let data = self
+                .staging_layer1_activations
+                .get_mapped_range(..)
+                .unwrap();
+            let words: &[u32] = bytemuck::cast_slice(&data);
+            decode_activations(words, 1024, 1024, 8, 0).to_vec()
+        };
 
-        out.copy_from_slice(&img);
+        self.staging_output.unmap();
+        self.staging_layer1_activations.unmap();
+
+        retina_out.copy_from_slice(&img);
+        layer1_out.copy_from_slice(&layer1_activations);
     }
 }
