@@ -1,13 +1,13 @@
 [package]
-name = "pyhebb"
+name = "pyjeanpierre"
 version = "0.1.0"
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
-name = "pyhebb"
+name = "pyjeanpierre"
 crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = "0.29.0"
-superhebb_core = { workspace = true }
+jean_pierre_core = { workspace = true }

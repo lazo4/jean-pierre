@@ -7,11 +7,16 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 
-[manifest]
-members = [
-    "pyhebb",
-    "superhebb",
+[[package]]
+name = "jean-pierre"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "opencv-python" },
 ]
+
+[package.metadata]
+requires-dist = [{ name = "opencv-python", specifier = ">=5.0.0.93" }]
 
 [[package]]
 name = "numpy"
@@ -256,18 +261,3 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/e2/4b/edaf83b996ca5a1a3d8ccad485706b9c6d4742b13b9c4586bf1c1e7d9423/opencv_python-5.0.0.93-cp37-abi3-win32.whl", hash = "sha256:4b4b1a34c79bf8d3738e3cfe9a9e67b51a79663f6b692cbdad8c31f570da4157", size = 35564734, upload-time = "2026-07-02T05:49:57.704Z" },
     { url = "https://files.pythonhosted.org/packages/21/f0/9fa6e85cb10c8eb36a0222d27e50fe381b86ce49a55446bf39f491727564/opencv_python-5.0.0.93-cp37-abi3-win_amd64.whl", hash = "sha256:f90ba04b8f73bc5c3814037699739f0156f597338a98f05956c684e7c3ca10d2", size = 44000345, upload-time = "2026-07-02T05:49:54.971Z" },
 ]
-
-[[package]]
-name = "pyhebb"
-source = { editable = "crates/pyhebb" }
-
-[[package]]
-name = "superhebb"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "opencv-python" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "opencv-python", specifier = ">=5.0.0.93" }]

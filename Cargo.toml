@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/superhebb_core", "crates/pyhebb"]
+members = ["crates/jean_pierre_core", "crates/pyjeanpierre"]
 resolver = "3"
 
 [workspace.dependencies]
-superhebb_core = { path = "crates/superhebb_core" }
+jean_pierre_core = { path = "crates/jean_pierre_core" }

@@ -370,6 +370,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "jean_pierre_core"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "image",
+ "pollster",
+ "rand",
+ "wgpu",
+]
+
+[[package]]
 name = "jni-sys"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -753,11 +764,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
-name = "pyhebb"
+name = "pyjeanpierre"
 version = "0.1.0"
 dependencies = [
+ "jean_pierre_core",
  "pyo3",
- "superhebb_core",
 ]
 
 [[package]]
@@ -977,17 +988,6 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
-name = "superhebb_core"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "image",
- "pollster",
- "rand",
- "wgpu",
-]
 
 [[package]]
 name = "syn"

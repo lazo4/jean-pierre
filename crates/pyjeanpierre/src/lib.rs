@@ -2,12 +2,12 @@ use pyo3::prelude::*;
 
 /// A Python module implemented in Rust.
 #[pymodule]
-mod pyhebb {
+mod pyjeanpierre {
     use pyo3::{prelude::*, types::PyBytes};
 
     #[pyclass]
     struct VisionSNN {
-        inner: superhebb_core::VisionSNN,
+        inner: jean_pierre_core::VisionSNN,
     }
 
     #[pymethods]
@@ -15,7 +15,7 @@ mod pyhebb {
         #[new]
         fn new() -> Self {
             Self {
-                inner: superhebb_core::VisionSNN::new(),
+                inner: jean_pierre_core::VisionSNN::new(),
             }
         }
 
@@ -26,11 +26,11 @@ mod pyhebb {
             micro_ticks: u32,
         ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
             // 1. Allocate temporary vectors
-            let mut retina_out = vec![0u8; 1024 * 1024 / 8];
+            let mut retina_out = vec![0u8; 1024 * 1024];
             let mut layer1_out = vec![0u8; 1024 * 1024];
 
             // 2. Call your original function
-            self.run_micro_ticks(
+            self.inner.run_micro_ticks(
                 input_frame,
                 micro_ticks,
                 retina_out.as_mut(),

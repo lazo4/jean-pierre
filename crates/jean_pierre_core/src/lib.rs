@@ -362,7 +362,7 @@ impl VisionSNN {
         let layer1_next_activations = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Layer 1 Next Activations"),
             size: 1024 * 1024,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
