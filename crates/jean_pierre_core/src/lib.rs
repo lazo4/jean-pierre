@@ -1,10 +1,13 @@
+use bytemuck::bytes_of;
 use image::GrayImage;
 use pollster::FutureExt;
-use rand::RngExt;
+use rand::distr::Uniform;
+use rand::{RngExt, random};
 use wgpu::{
     BufferUsages, ComputePipelineDescriptor, Extent3d, Instance, Origin3d, ShaderModuleDescriptor,
 };
 
+use rand::Fill;
 use rand::Rng;
 
 pub struct SaccadeGenerator<T: Rng> {
@@ -88,16 +91,15 @@ pub fn decode_activations(
     target_kernel: u32,
 ) -> GrayImage {
     let mut img = GrayImage::new(width, height);
-    let words_per_row = width * kernels / 32;
 
     for y in 0..height {
         for x in 0..width {
-            let word_idx = (((y * words_per_row + x) * kernels + target_kernel) / 32) as usize;
-            let bit_idx = x % 32;
+            let words_per_row = width / 32;
+            let row_offset = x / 32;
+            let word_index = (y * words_per_row + row_offset) * kernels;
+            let activations = words[(word_index + target_kernel) as usize];
 
-            let word = words[word_idx];
-
-            let spike = (word & (1 << bit_idx)) != 0;
+            let spike = (activations & (1 << x % 32)) != 0;
 
             let pixel_val = if spike { 255 } else { 0 };
             img.put_pixel(x, y, image::Luma([pixel_val]));
@@ -374,6 +376,15 @@ impl VisionSNN {
             mapped_at_creation: false,
         });
 
+        let mut rng = rand::rng();
+        let range = Uniform::new(-20, 20).unwrap();
+
+        let vals: Vec<u8> = (0..(8 * 8 * 8 * 2))
+            .map(|_| rng.sample(&range) as u8)
+            .collect();
+
+        queue.write_buffer(&layer1_vertical_weights, 0, &vals);
+
         let layer1_next_vertical_weights = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Layer 1 Next Vertical Weights"),
             // 8 rows, 8 columns / 8 bits per row, 8 kernels, 8 bitplanes, 2 input channels
@@ -596,15 +607,15 @@ impl VisionSNN {
             pass.set_bind_group(0, bind_group, &[]);
             pass.dispatch_workgroups(4, 1024, 1);
 
-            // Update epsilon
-            pass.set_pipeline(&self.epsilon_pipeline);
-            pass.set_bind_group(0, bind_group, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
-
             // Inference pass
             pass.set_pipeline(&self.layer1_inference_pipeline);
             pass.set_bind_group(0, bind_group, &[]);
             pass.dispatch_workgroups(1024 / 256, 1024, 8);
+
+            // Update epsilon
+            pass.set_pipeline(&self.epsilon_pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
 
             drop(pass);
 
