@@ -24,10 +24,15 @@ mod pyjeanpierre {
             py: Python<'py>,
             input_frame: &[u8],
             micro_ticks: u32,
-        ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
+        ) -> PyResult<(
+            Bound<'py, PyBytes>,
+            Bound<'py, PyBytes>,
+            Bound<'py, PyBytes>,
+        )> {
             // 1. Allocate temporary vectors
             let mut retina_out = vec![0u8; 1024 * 1024];
             let mut layer1_out = vec![0u8; 1024 * 1024];
+            let mut layer1_weights_out = vec![0u8; 5 * 5];
 
             // 2. Call your original function
             self.inner.run_micro_ticks(
@@ -35,14 +40,16 @@ mod pyjeanpierre {
                 micro_ticks,
                 retina_out.as_mut(),
                 layer1_out.as_mut(),
+                layer1_weights_out.as_mut(),
             );
 
             // 3. Convert the vectors into Python bytes objects (copies data)
             let retina_bytes = PyBytes::new(py, &retina_out);
             let layer1_bytes = PyBytes::new(py, &layer1_out);
+            let layer1_weights_bytes = PyBytes::new(py, &layer1_weights_out);
 
             // 4. Return as a Python tuple
-            Ok((retina_bytes, layer1_bytes))
+            Ok((retina_bytes, layer1_bytes, layer1_weights_bytes))
         }
     }
 }

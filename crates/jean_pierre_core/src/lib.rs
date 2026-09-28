@@ -109,6 +109,21 @@ pub fn decode_activations(
     img
 }
 
+pub fn decode_vertical_weights(words: &[u8], rows: u32, cols: u32) -> GrayImage {
+    let mut img = GrayImage::new(rows, cols);
+
+    for y in 0..rows {
+        for x in 0..cols {
+            let index = (y * cols + x) as usize;
+            let weight = words[index] as i8;
+            let pixel_val = (weight as i16 + 128) as u8;
+            img.put_pixel(x, y, image::Luma([pixel_val]));
+        }
+    }
+
+    img
+}
+
 pub struct VisionSNN {
     pub instance: Instance,
     pub adapter: wgpu::Adapter,
@@ -130,6 +145,7 @@ pub struct VisionSNN {
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub staging_output: wgpu::Buffer,
     pub staging_layer1_activations: wgpu::Buffer,
+    pub staging_layer1_vertical_weights: wgpu::Buffer,
     pub layer1_activations: wgpu::Buffer,
     pub layer1_next_activations: wgpu::Buffer,
     pub layer1_vertical_weights: wgpu::Buffer,
@@ -372,23 +388,28 @@ impl VisionSNN {
             label: Some("Layer 1 Vertical Weights"),
             // 2 input channels 8 rows, 8 columns, 8 kernels
             size: 8 * 8 * 8 * 2,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
-        let mut rng = rand::rng();
-        let range = Uniform::new(-20, 20).unwrap();
+        // let mut rng = rand::rng();
+        // let range = Uniform::new(-20, 20).unwrap();
 
-        let vals: Vec<u8> = (0..(8 * 8 * 8 * 2))
-            .map(|_| rng.sample(&range) as u8)
-            .collect();
-
+        // let vals: Vec<u8> = (0..(8 * 8 * 8 * 2))
+        // .map(|_| rng.sample(&range) as u8)
+        // .collect();
+        let mut vals = vec![0; 5 * 5 * 8 * 2];
+        vals[0..5].copy_from_slice(&[0, 0, 127, 0, 0]);
+        vals[5..10].copy_from_slice(&[0, 0, 127, 0, 0]);
+        vals[10..15].copy_from_slice(&[0, 0, 127, 0, 0]);
+        vals[15..20].copy_from_slice(&[0, 0, 127, 0, 0]);
+        vals[20..25].copy_from_slice(&[0, 0, 127, 0, 0]);
         queue.write_buffer(&layer1_vertical_weights, 0, &vals);
 
         let layer1_next_vertical_weights = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Layer 1 Next Vertical Weights"),
-            // 8 rows, 8 columns / 8 bits per row, 8 kernels, 8 bitplanes, 2 input channels
-            size: 8 * 8 * 8 * 2,
+            // 5 rows, 5 columns 8 kernels, 2 input channels
+            size: 5 * 5 * 8 * 2,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -517,6 +538,13 @@ impl VisionSNN {
             mapped_at_creation: false,
         });
 
+        let staging_layer1_vertical_weights = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Staging Layer 1 Vertical Weights"),
+            size: (8 * 8 * 8 * 2) as u64, // 262,144 bytes
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
         Self {
             instance,
             adapter,
@@ -535,6 +563,7 @@ impl VisionSNN {
             epsilon_buf,
             staging_output,
             staging_layer1_activations,
+            staging_layer1_vertical_weights,
             ping_bind_group,
             pong_bind_group,
             bind_group_layout,
@@ -555,6 +584,7 @@ impl VisionSNN {
         micro_ticks: u32,
         retina_out: &mut [u8],
         layer1_out: &mut [u8],
+        layer1_weights_out: &mut [u8],
     ) {
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -635,9 +665,22 @@ impl VisionSNN {
             0,
             None,
         );
+        encoder.copy_buffer_to_buffer(
+            &self.layer1_vertical_weights,
+            0,
+            &self.staging_layer1_vertical_weights,
+            0,
+            None,
+        );
         encoder.map_buffer_on_submit(&self.staging_output, wgpu::MapMode::Read, .., |_| {});
         encoder.map_buffer_on_submit(
             &self.staging_layer1_activations,
+            wgpu::MapMode::Read,
+            ..,
+            |_| {},
+        );
+        encoder.map_buffer_on_submit(
+            &self.staging_layer1_vertical_weights,
             wgpu::MapMode::Read,
             ..,
             |_| {},
@@ -663,10 +706,21 @@ impl VisionSNN {
             decode_activations(words, 1024, 1024, 8, 0).to_vec()
         };
 
+        let layer1_vertical_weights = {
+            let data = self
+                .staging_layer1_vertical_weights
+                .get_mapped_range(..)
+                .unwrap();
+            let words: &[u8] = bytemuck::cast_slice(&data);
+            decode_vertical_weights(words, 5, 5).to_vec()
+        };
+
         self.staging_output.unmap();
         self.staging_layer1_activations.unmap();
+        self.staging_layer1_vertical_weights.unmap();
 
         retina_out.copy_from_slice(&img);
         layer1_out.copy_from_slice(&layer1_activations);
+        layer1_weights_out.copy_from_slice(&layer1_vertical_weights);
     }
 }

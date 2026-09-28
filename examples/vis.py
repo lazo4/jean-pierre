@@ -26,7 +26,7 @@ def center_crop_square(frame, target_size=1024):
 snn = VisionSNN()
 
 # Continuity Camera capture (0 or 1 depending on built-in Mac webcam setup)
-cap = cv2.VideoCapture(1)
+cap = cv2.VideoCapture(0)
 
 fps_counter = 0
 last_time = time.time()
@@ -42,11 +42,12 @@ while cap.isOpened():
     frame_rgba = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGBA)
 
     # 2. Step 10 GPU micro-ticks in Rust
-    (spike_bytes, activations) = snn.run_micro_ticks(frame_rgba.tobytes(), 10)
+    (spike_bytes, activations, weights) = snn.run_micro_ticks(frame_rgba.tobytes(), 10)
 
     # 3. Convert returned bytes back into a NumPy image
     spike_img = np.frombuffer(spike_bytes, dtype=np.uint8).reshape((1024, 1024))
     activations = np.frombuffer(activations, dtype=np.uint8).reshape((1024, 1024))
+    weights = np.frombuffer(weights, dtype=np.uint8).reshape((5, 5))
 
     # 4. Calculate FPS
     fps_counter += 1
@@ -62,9 +63,15 @@ while cap.isOpened():
     )
 
     activations_view = cv2.cvtColor(activations, cv2.COLOR_GRAY2BGR)
+    weights_view = cv2.cvtColor(weights, cv2.COLOR_GRAY2BGR)
+    weights_view = cv2.resize(
+        weights_view, (1024, 1024), interpolation=cv2.INTER_NEAREST
+    )
 
     # Display side-by-side: Live iPhone Feed | GPU Retina Spikes
-    combined = np.hstack((frame_resized, debug_view, activations_view))
+    top = np.hstack((frame_resized, debug_view))
+    bottom = np.hstack((activations_view, weights_view))
+    combined = np.vstack((top, bottom))
     cv2.imshow("iPhone Continuity Retina Simulator", combined)
 
     if cv2.waitKey(1) & 0xFF == ord("q"):

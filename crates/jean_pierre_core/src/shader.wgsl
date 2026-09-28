@@ -75,8 +75,8 @@ fn preprocess_frame(
     }
 }
 
-const DECAY: f32 = 0.0001;  // Smooth threshold decrease rate
-const SPIKE: f32 = 0.0019;  // 19 * DECAY -> 5% steady-state density
+const DECAY: f32 = 0.001;  // Smooth threshold decrease rate
+const SPIKE: f32 = 0.019;  // 19 * DECAY -> 5% steady-state density
 const TOTAL_INPUT_NEURONS: u32 = 1024 * 1024 * 2;
 const DECAY_1: f32 = 1;
 const SPIKE_1: f32 = 19;
@@ -131,9 +131,10 @@ fn get_input_word(is_on: u32, x: i32, y: i32) -> u32 {
 }
 
 // Compute the inference pass of the V1 exploiting the power of subgroups
-@compute @workgroup_size(16, 16, 1)
+@compute @workgroup_size(256, 1, 1)
 fn inference(
     @builtin(global_invocation_id) global_id: vec3u,
+    @builtin(subgroup_invocation_id) lane_id: u32,
 ) {
     // Each thread processes 1 neuron 
 
@@ -146,7 +147,7 @@ fn inference(
 
     // Threshold the sum and write the result
     let activations = subgroupBallot(f32(sum) > epsilon[1]).x;
-    if subgroupElect() {
+    if lane_id == 0u {
         let words_per_row = params.width / 32u;
         let row_offset = global_id.x / 32u;
         let word_index = (global_id.y * words_per_row + row_offset) * 8u;
