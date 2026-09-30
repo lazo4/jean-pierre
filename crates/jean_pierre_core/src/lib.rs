@@ -398,13 +398,13 @@ impl VisionSNN {
         // let vals: Vec<u8> = (0..(8 * 8 * 8 * 2))
         // .map(|_| rng.sample(&range) as u8)
         // .collect();
-        let mut vals = vec![0; 5 * 5 * 8 * 2];
-        vals[0..5].copy_from_slice(&[0, 0, 127, 0, 0]);
-        vals[5..10].copy_from_slice(&[0, 0, 127, 0, 0]);
-        vals[10..15].copy_from_slice(&[0, 0, 127, 0, 0]);
-        vals[15..20].copy_from_slice(&[0, 0, 127, 0, 0]);
-        vals[20..25].copy_from_slice(&[0, 0, 127, 0, 0]);
-        queue.write_buffer(&layer1_vertical_weights, 0, &vals);
+        let mut vals: Vec<i8> = vec![0; 5 * 5 * 8 * 2];
+        vals[0..5].copy_from_slice(&[-100, -100, 127, -100, -100]);
+        vals[5..10].copy_from_slice(&[-100, -100, 127, -100, -100]);
+        vals[10..15].copy_from_slice(&[-100, -100, 127, -100, -100]);
+        vals[15..20].copy_from_slice(&[-100, -100, 127, -100, -100]);
+        vals[20..25].copy_from_slice(&[-100, -100, 127, -100, -100]);
+        queue.write_buffer(&layer1_vertical_weights, 0, bytemuck::cast_slice(&vals));
 
         let layer1_next_vertical_weights = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Layer 1 Next Vertical Weights"),

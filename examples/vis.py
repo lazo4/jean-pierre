@@ -4,6 +4,8 @@ import cv2
 import numpy as np
 from pyjeanpierre import VisionSNN
 
+MICRO_TICKS_PER_FRAME = 5
+
 
 def center_crop_square(frame, target_size=1024):
     h, w, _ = frame.shape
@@ -42,7 +44,9 @@ while cap.isOpened():
     frame_rgba = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGBA)
 
     # 2. Step 10 GPU micro-ticks in Rust
-    (spike_bytes, activations, weights) = snn.run_micro_ticks(frame_rgba.tobytes(), 10)
+    (spike_bytes, activations, weights) = snn.run_micro_ticks(
+        frame_rgba.tobytes(), MICRO_TICKS_PER_FRAME
+    )
 
     # 3. Convert returned bytes back into a NumPy image
     spike_img = np.frombuffer(spike_bytes, dtype=np.uint8).reshape((1024, 1024))
@@ -52,7 +56,9 @@ while cap.isOpened():
     # 4. Calculate FPS
     fps_counter += 1
     if time.time() - last_time >= 1.0:
-        fps_display = f"FPS: {fps_counter} | Micro-FPS: {fps_counter * 10}"
+        fps_display = (
+            f"FPS: {fps_counter} | Micro-FPS: {fps_counter * MICRO_TICKS_PER_FRAME}"
+        )
         fps_counter = 0
         last_time = time.time()
 
