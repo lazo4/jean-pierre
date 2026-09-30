@@ -75,8 +75,8 @@ fn preprocess_frame(
     }
 }
 
-const DECAY: f32 = 0.001;  // Smooth threshold decrease rate
-const SPIKE: f32 = 0.019;  // 19 * DECAY -> 5% steady-state density
+const DECAY: f32 = 0.002;  // Smooth threshold decrease rate
+const SPIKE: f32 = 0.038;  // 19 * DECAY -> 5% steady-state density
 const TOTAL_INPUT_NEURONS: u32 = 1024 * 1024 * 2;
 const DECAY_1: f32 = 1;
 const SPIKE_1: f32 = 19;
@@ -109,7 +109,7 @@ fn update_epsilon() {
 @group(0) @binding(7) var<storage, read_write> layer1_next_activations: array<u32>;
 @group(0) @binding(8) var<storage, read_write> layer1_vertical_weights: array<u32>;
 @group(0) @binding(9) var<storage, read_write> layer1_next_vertical_weights: array<u32>;
-@group(0) @binding(10) var<storage, read_write> layer1_vertical_deltas: array<u32>;
+@group(0) @binding(10) var<storage, read_write> layer1_vertical_deltas: array<atomic<i32>>;
 
 fn get_weight_word(is_on: u32, kernel: u32, row: u32, column: u32) -> u32 {
     let words_per_kernel = 8u * 8u * 2u / 4u;
@@ -130,10 +130,19 @@ fn get_input_word(is_on: u32, x: i32, y: i32) -> u32 {
     return layer1_input[word_index + is_on];
 }
 
+// TODO: Process weights 4 at a time!!
 fn get_weight(idx: u32) -> i32 {
     let word = layer1_vertical_weights[idx / 4u];
     let weightvec = unpack4xI8(word);
     return weightvec[idx % 4u];
+}
+
+// TODO: Same as above
+fn set_weight(idx: u32, val: i32) {
+    let word = layer1_next_vertical_weights[idx / 4u];
+    var weightvec = unpack4xI8(word);
+    weightvec[idx % 4u] = val;
+    layer1_next_vertical_weights[idx / 4u] = pack4xI8(weightvec);
 }
 
 // Compute the inference pass of the V1 exploiting the power of subgroups
@@ -219,3 +228,81 @@ fn inference(
         }
     }
 }
+
+const ETA = 0.01;
+const PIXELS_PER_WORKGROUP = 256 * 32;
+
+@compute @workgroup_size(256, 1, 1)
+fn compute_stdp_deltas(
+    @builtin(global_invocation_id) global_id: vec3u,
+    @builtin(subgroup_invocation_id) lane_id: u32,
+) {
+    // Each thread updates all 25 weights for 32 neurons
+    // NOTE: Since we have to keep our workgroups one dimensional, each workgroup is going to process several rows
+    let rows_per_workgroup = PIXELS_PER_WORKGROUP / params.width;
+    let y = global_id.y * rows_per_workgroup + (global_id.x * 32) / params.width;
+    let x_begin = (global_id.x * 32) % params.width;
+
+    if x_begin >= params.width || y >= params.height { return; }
+
+    let words_per_row = params.width / 32u;
+    let row_offset = x_begin / 32u;
+    let word_index = (y * words_per_row + row_offset) * 8u;
+    let prev_postsyn = layer1_activations[word_index + global_id.z];
+    let next_postsyn = layer1_next_activations[word_index + global_id.z];
+
+    for (var ry = -2; ry <= 2; ry++) {
+        let presyn_y = i32(y) + ry;
+
+        // Handle vertical zero-padding bounds
+        if presyn_y < 0 || presyn_y >= i32(params.height) {
+            continue;
+        }
+
+        let word_index = (u32(presyn_y) * words_per_row + row_offset) * 2u;
+
+        let presyn_word_curr = layer1_input[word_index + 1];
+        var presyn_word_prev = 0u;
+        var presyn_word_next = 0u;
+        if row_offset > 0u {
+            presyn_word_prev = layer1_input[word_index - 2 + 1];
+        }
+        if row_offset + 2u + 1 < words_per_row {
+            presyn_word_next = layer1_input[word_index + 2 + 1];
+        }
+
+        for (var rx = -2; rx <= 2; rx++) {
+            let weight_idx = u32(ry + 2) * 5u + u32(rx + 2);
+
+            // --- Bit-Align Presynaptic Window for Offset rx ---
+            var presyn: u32;
+            if rx < 0 {
+                let shift = u32(-rx);
+                presyn = (presyn_word_curr << shift) | (presyn_word_prev >> (32u - shift));
+            } else if rx > 0 {
+                let shift = u32(rx);
+                presyn = (presyn_word_curr >> shift) | (presyn_word_next << (32u - shift));
+            } else {
+                presyn = presyn_word_curr;
+            }
+
+            let prev_presyn = presyn;
+            let next_presyn = prev_presyn; // TODO: Soundness: Previous and next inputs should be separate too...
+
+            // The beautiful part
+            let delta = i32(countOneBits(prev_presyn & next_postsyn)) - i32(countOneBits(next_presyn & prev_postsyn));
+            atomicAdd(&layer1_vertical_deltas[weight_idx], delta);
+        }
+    }
+}
+
+@compute @workgroup_size(25, 1, 1)
+fn apply_stdp_deltas(
+    @builtin(global_invocation_id) global_id: vec3u,
+) {
+    let weight_idx = global_id.x;
+    let delta = atomicExchange(&layer1_vertical_deltas[weight_idx], 0);
+    let weight = clamp(get_weight(weight_idx) + i32(f32(delta) * ETA), -128, 127);
+    set_weight(weight_idx, weight);
+}
+

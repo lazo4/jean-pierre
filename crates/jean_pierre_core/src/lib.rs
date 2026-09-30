@@ -133,6 +133,8 @@ pub struct VisionSNN {
     pub micro_tick_pipeline: wgpu::ComputePipeline,
     pub epsilon_pipeline: wgpu::ComputePipeline,
     pub layer1_inference_pipeline: wgpu::ComputePipeline,
+    pub layer1_stdp_pipeline: wgpu::ComputePipeline,
+    pub apply_stdp_deltas_pipeline: wgpu::ComputePipeline,
     pub input_frame_texture: wgpu::Texture,
     pub input_frame_view: wgpu::TextureView,
     pub input_sampler: wgpu::Sampler,
@@ -321,6 +323,23 @@ impl VisionSNN {
                 compilation_options: Default::default(),
                 cache: None,
             });
+        let layer1_stdp_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("Layer 1 STDP pipe"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("compute_stdp_deltas"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let apply_stdp_deltas_pipeline =
+            device.create_compute_pipeline(&ComputePipelineDescriptor {
+                label: Some("Apply STDP pipe"),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("apply_stdp_deltas"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         let input_frame_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Input frame texture"),
             size: Extent3d {
@@ -387,23 +406,21 @@ impl VisionSNN {
         let layer1_vertical_weights = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Layer 1 Vertical Weights"),
             // 2 input channels 8 rows, 8 columns, 8 kernels
-            size: 8 * 8 * 8 * 2,
+            size: 5 * 5 * 8 * 2,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
-        // let mut rng = rand::rng();
-        // let range = Uniform::new(-20, 20).unwrap();
+        let mut rng = rand::rng();
+        let range = Uniform::new(-20, 20).unwrap();
 
-        // let vals: Vec<u8> = (0..(8 * 8 * 8 * 2))
-        // .map(|_| rng.sample(&range) as u8)
-        // .collect();
-        let mut vals: Vec<i8> = vec![0; 5 * 5 * 8 * 2];
-        vals[0..5].copy_from_slice(&[-100, -100, 127, -100, -100]);
-        vals[5..10].copy_from_slice(&[-100, -100, 127, -100, -100]);
-        vals[10..15].copy_from_slice(&[-100, -100, 127, -100, -100]);
-        vals[15..20].copy_from_slice(&[-100, -100, 127, -100, -100]);
-        vals[20..25].copy_from_slice(&[-100, -100, 127, -100, -100]);
+        let vals: Vec<i8> = (0..(5 * 5 * 8 * 2)).map(|_| rng.sample(&range)).collect();
+        // let mut vals: Vec<i8> = vec![0; 5 * 5 * 8 * 2];
+        // vals[0..5].copy_from_slice(&[-54, -27, 0, 27, 54]);
+        // vals[5..10].copy_from_slice(&[-54, -27, 0, 27, 54]);
+        // vals[10..15].copy_from_slice(&[-108, -54, 0, 54, 108]);
+        // vals[15..20].copy_from_slice(&[-54, -27, 0, 27, 54]);
+        // vals[20..25].copy_from_slice(&[-54, -27, 0, 27, 54]);
         queue.write_buffer(&layer1_vertical_weights, 0, bytemuck::cast_slice(&vals));
 
         let layer1_next_vertical_weights = device.create_buffer(&wgpu::BufferDescriptor {
@@ -416,7 +433,7 @@ impl VisionSNN {
 
         let layer1_vertical_deltas = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Layer 1 Vertical Deltas"),
-            size: 8 * 8 * 8 * 4, // 8 rows, 8 columns, 8 kernels, 4 bytes per delta
+            size: 5 * 5 * 8 * 2 * 4, // 5 rows, 5 columns, 8 kernels, 4 bytes per delta
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -554,6 +571,8 @@ impl VisionSNN {
             micro_tick_pipeline,
             epsilon_pipeline,
             layer1_inference_pipeline,
+            layer1_stdp_pipeline,
+            apply_stdp_deltas_pipeline,
             input_frame_texture,
             input_frame_view,
             input_sampler,
@@ -644,6 +663,16 @@ impl VisionSNN {
 
             // Update epsilon
             pass.set_pipeline(&self.epsilon_pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+
+            // STDP pass
+            pass.set_pipeline(&self.layer1_stdp_pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.dispatch_workgroups(1, 8192 / 1024, 1);
+
+            // Apply Deltas
+            pass.set_pipeline(&self.apply_stdp_deltas_pipeline);
             pass.set_bind_group(0, bind_group, &[]);
             pass.dispatch_workgroups(1, 1, 1);
 
