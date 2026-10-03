@@ -30,8 +30,8 @@ mod pyjeanpierre {
             Bound<'py, PyBytes>,
         )> {
             // 1. Allocate temporary vectors
-            let mut retina_out = vec![0u8; 1024 * 1024];
-            let mut layer1_out = vec![0u8; 1024 * 1024];
+            let mut retina_out = vec![0u8; 512 * 512];
+            let mut layer1_out = vec![0u8; 512 * 512];
             let mut layer1_weights_out = vec![0u8; 5 * 5];
 
             // 2. Call your original function

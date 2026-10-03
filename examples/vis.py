@@ -4,10 +4,10 @@ import cv2
 import numpy as np
 from pyjeanpierre import VisionSNN
 
-MICRO_TICKS_PER_FRAME = 5
+MICRO_TICKS_PER_FRAME = 10
 
 
-def center_crop_square(frame, target_size=1024):
+def center_crop_square(frame, target_size=512):
     h, w, _ = frame.shape
     min_dim = min(h, w)
 
@@ -28,7 +28,7 @@ def center_crop_square(frame, target_size=1024):
 snn = VisionSNN()
 
 # Continuity Camera capture (0 or 1 depending on built-in Mac webcam setup)
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(1)
 
 fps_counter = 0
 last_time = time.time()
@@ -49,8 +49,8 @@ while cap.isOpened():
     )
 
     # 3. Convert returned bytes back into a NumPy image
-    spike_img = np.frombuffer(spike_bytes, dtype=np.uint8).reshape((1024, 1024))
-    activations = np.frombuffer(activations, dtype=np.uint8).reshape((1024, 1024))
+    spike_img = np.frombuffer(spike_bytes, dtype=np.uint8).reshape((512, 512))
+    activations = np.frombuffer(activations, dtype=np.uint8).reshape((512, 512))
     weights = np.frombuffer(weights, dtype=np.uint8).reshape((5, 5))
 
     # 4. Calculate FPS
@@ -70,9 +70,7 @@ while cap.isOpened():
 
     activations_view = cv2.cvtColor(activations, cv2.COLOR_GRAY2BGR)
     weights_view = cv2.cvtColor(weights, cv2.COLOR_GRAY2BGR)
-    weights_view = cv2.resize(
-        weights_view, (1024, 1024), interpolation=cv2.INTER_NEAREST
-    )
+    weights_view = cv2.resize(weights_view, (512, 512), interpolation=cv2.INTER_NEAREST)
 
     # Display side-by-side: Live iPhone Feed | GPU Retina Spikes
     top = np.hstack((frame_resized, debug_view))

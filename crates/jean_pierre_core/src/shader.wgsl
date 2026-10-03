@@ -77,10 +77,10 @@ fn preprocess_frame(
 
 const DECAY: f32 = 0.002;  // Smooth threshold decrease rate
 const SPIKE: f32 = 0.038;  // 19 * DECAY -> 5% steady-state density
-const TOTAL_INPUT_NEURONS: u32 = 1024 * 1024 * 2;
+const TOTAL_INPUT_NEURONS: u32 = 512 * 512 * 2;
 const DECAY_1: f32 = 1;
 const SPIKE_1: f32 = 19;
-const TOTAL_LAYER1_NEURONS: u32 = 1024 * 1024 * 8;
+const TOTAL_LAYER1_NEURONS: u32 = 512 * 512 * 8;
 
 @compute @workgroup_size(1, 1, 1)
 fn update_epsilon() {
@@ -110,25 +110,6 @@ fn update_epsilon() {
 @group(0) @binding(8) var<storage, read_write> layer1_vertical_weights: array<u32>;
 @group(0) @binding(9) var<storage, read_write> layer1_next_vertical_weights: array<u32>;
 @group(0) @binding(10) var<storage, read_write> layer1_vertical_deltas: array<atomic<i32>>;
-
-fn get_weight_word(is_on: u32, kernel: u32, row: u32, column: u32) -> u32 {
-    let words_per_kernel = 8u * 8u * 2u / 4u;
-    let words_per_row = 8u * 2 / 4;
-    let row_offset = kernel * words_per_kernel + row * words_per_row;
-    let index = row_offset + (column * 2u / 4u) + is_on;
-
-    return layer1_vertical_weights[index];
-}
-
-fn get_input_word(is_on: u32, x: i32, y: i32) -> u32 {
-    if x < 0 || y < 0 || x >= i32(params.width) || y >= i32(params.height) {
-        return 0u;
-    }
-    let words_per_row = params.width / 32u;
-    let row_offset = u32(x) / 32u;
-    let word_index = (u32(y) * words_per_row + row_offset) * 2u;
-    return layer1_input[word_index + is_on];
-}
 
 // TODO: Process weights 4 at a time!!
 fn get_weight(idx: u32) -> i32 {
@@ -229,7 +210,7 @@ fn inference(
     }
 }
 
-const ETA = 0.01;
+const ETA = 0.001;
 const PIXELS_PER_WORKGROUP = 256 * 32;
 
 @compute @workgroup_size(256, 1, 1)
