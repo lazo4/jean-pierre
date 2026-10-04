@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 from pyjeanpierre import VisionSNN
 
-MICRO_TICKS_PER_FRAME = 10
+MICRO_TICKS_PER_FRAME = 1
 
 
 def center_crop_square(frame, target_size=512):
@@ -28,7 +28,7 @@ def center_crop_square(frame, target_size=512):
 snn = VisionSNN()
 
 # Continuity Camera capture (0 or 1 depending on built-in Mac webcam setup)
-cap = cv2.VideoCapture(1)
+cap = cv2.VideoCapture(0)
 
 fps_counter = 0
 last_time = time.time()

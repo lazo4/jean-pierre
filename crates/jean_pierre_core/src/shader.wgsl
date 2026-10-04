@@ -10,9 +10,9 @@ struct FrameParams {
 // Channel packed, so even channels have OFF bits and odd channels have ON bits
 // Each word is an 8x4 rectangle of pixels, to improve memory locality
 @group(0) @binding(2) var<storage, read_write> layer1_input: array<u32>;
-@group(0) @binding(3) var<storage, read_write> spike_counter: array<atomic<u32>>;
+@group(0) @binding(3) var<storage, read_write> spike_counter: array<f32>;
 @group(0) @binding(4) var<uniform> params: FrameParams;
-@group(0) @binding(5) var<storage, read_write> epsilon: array<f32>;
+@group(0) @binding(5) var<storage, read_write> input_epsilon: array<f32>;
 
 fn get_luminance(coords: vec2f) -> f32 {
     let jittered_pos = coords + vec2f(params.saccade_x, params.saccade_y);
@@ -27,6 +27,12 @@ fn get_luminance(coords: vec2f) -> f32 {
     let rgba = textureSampleLevel(raw_frame, input_sampler, uv, 0.0);
     return dot(rgba.rgb, vec3f(0.2126, 0.7152, 0.0722));
 }
+
+const DECAY: f32 = 0.001;  // Smooth threshold decrease rate
+const SPIKE: f32 = 0.019;  // 19 * DECAY -> 5% steady-state density
+const SODIUM_DECAY: f32 = 0.10;
+const SODIUM_SPIKE: f32 = 0.30;
+const EPSILON_BASE: f32 = 0.01;
 
 // Each thread processes 1 pixel. Pixels are then aggregated by subgroup into 8x4 windows
 @compute @workgroup_size(256, 1, 1)
@@ -53,13 +59,27 @@ fn preprocess_frame(
 
     let diff = center_lum - (surround_sum * 0.11111111);
 
-    // Now shift by SIMD lane id
+    let epsilon_idx = (y * params.width + x) * 2;
+    let off_epsilon = input_epsilon[epsilon_idx];
+    let on_epsilon = input_epsilon[epsilon_idx + 1];
 
-    let is_on = u32(diff > epsilon[0]) << lane_id;
-    let is_off = u32(diff < -epsilon[0]) << lane_id;
+    let is_off = diff < -off_epsilon;
+    let is_on = diff > on_epsilon;
 
-    let word_on = subgroupOr(is_on);
-    let word_off = subgroupOr(is_off);
+    if !is_off {
+        input_epsilon[epsilon_idx] = max((off_epsilon * SODIUM_DECAY) - DECAY, EPSILON_BASE);
+    } else {
+        input_epsilon[epsilon_idx] = off_epsilon + SPIKE + SODIUM_SPIKE;
+    }
+
+    if !is_on {
+        input_epsilon[epsilon_idx + 1] = max((off_epsilon * SODIUM_DECAY) - DECAY, EPSILON_BASE);
+    } else {
+        input_epsilon[epsilon_idx + 1] = on_epsilon + SPIKE + SODIUM_SPIKE;
+    }
+
+    let word_on = subgroupBallot(is_on).x;
+    let word_off = subgroupBallot(is_off).x;
 
     if lane_id == 0u {
         let words_per_row = params.width / 32u;
@@ -67,41 +87,30 @@ fn preprocess_frame(
         let word_index = (y * words_per_row + row_offset) * 2u;
         layer1_input[word_index] = word_off;
         layer1_input[word_index + 1] = word_on;
-
-        let spike_count = countOneBits(word_on) + countOneBits(word_off);
-        if spike_count > 0u {
-            atomicAdd(&spike_counter[0], spike_count);
-        }
     }
 }
 
-const DECAY: f32 = 0.002;  // Smooth threshold decrease rate
-const SPIKE: f32 = 0.038;  // 19 * DECAY -> 5% steady-state density
 const TOTAL_INPUT_NEURONS: u32 = 512 * 512 * 2;
 const DECAY_1: f32 = 1;
 const SPIKE_1: f32 = 19;
 const TOTAL_LAYER1_NEURONS: u32 = 512 * 512 * 8;
 
-@compute @workgroup_size(1, 1, 1)
-fn update_epsilon() {
-    // Read total spikes AND reset counter to 0 in 1 atomic operation!
-    let total_spikes = atomicExchange(&spike_counter[0], 0u);
+@compute @workgroup_size(256, 1, 1)
+fn write_spike_counts(
+    @builtin(global_invocation_id) global_id: vec3u,
+) {
+    // NOTE: Since we have to keep our workgroups one dimensional, each workgroup is going to process several rows
+    let rows_per_workgroup = PIXELS_PER_WORKGROUP / params.width;
+    let y = global_id.y * rows_per_workgroup + (global_id.x * 32) / params.width;
+    let x_begin = (global_id.x * 32) % params.width;
 
-    // Express spikes as a 0.0 to 1.0 rate
-    let spike_rate = f32(total_spikes) / f32(TOTAL_INPUT_NEURONS);
-    let zero_rate = 1.0 - spike_rate;
+    if x_begin >= params.width || y >= params.height { return; }
 
-    let delta = (spike_rate * SPIKE) - (zero_rate * DECAY);
-    // Update GPU epsilon directly
-    epsilon[0] = clamp(epsilon[0] + delta, 0.0, 1.0);
+    let words_per_row = params.width / 32u;
+    let row_offset = x_begin / 32u;
+    let word_index = (y * words_per_row + row_offset) * 2u;
 
-    let total_spikes_1 = atomicExchange(&spike_counter[1], 0u);
-    let spike_rate_1 = f32(total_spikes_1) / f32(TOTAL_LAYER1_NEURONS);
-    let zero_rate_1 = 1.0 - spike_rate_1;
-
-    let delta_1 = (spike_rate_1 * SPIKE_1) - (zero_rate_1 * DECAY_1);
-    // Update GPU epsilon directly
-    epsilon[1] = max(epsilon[1] + delta_1, 0.0);
+    let x_center = f32(x_begin) + 15.5;
 }
 
 // Activations for layer 1
@@ -196,18 +205,13 @@ fn inference(
         accum += select(0, get_weight(w_base + 4u), act_p2);
     }
     // Threshold the sum and write the result
-    let activations = subgroupBallot(f32(accum) > epsilon[1]).x;
+    /*let activations = subgroupBallot(f32(accum) > epsilon[1]).x;
     if lane_id == 0u {
         let words_per_row = params.width / 32u;
         let row_offset = global_id.x / 32u;
         let word_index = (global_id.y * words_per_row + row_offset) * 8u;
         layer1_next_activations[word_index + global_id.z] = activations;
-
-        let spike_count = countOneBits(activations);
-        if spike_count > 0u {
-            atomicAdd(&spike_counter[1], spike_count);
-        }
-    }
+    }*/
 }
 
 const ETA = 0.001;

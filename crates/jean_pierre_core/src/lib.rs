@@ -1,4 +1,3 @@
-use bytemuck::bytes_of;
 use image::GrayImage;
 use pollster::FutureExt;
 use rand::distr::Uniform;
@@ -7,7 +6,6 @@ use wgpu::{
     BufferUsages, ComputePipelineDescriptor, Extent3d, Instance, Origin3d, ShaderModuleDescriptor,
 };
 
-use rand::Fill;
 use rand::Rng;
 
 pub struct SaccadeGenerator<T: Rng> {
@@ -131,7 +129,7 @@ pub struct VisionSNN {
     pub queue: wgpu::Queue,
     pub shader: wgpu::ShaderModule,
     pub micro_tick_pipeline: wgpu::ComputePipeline,
-    pub epsilon_pipeline: wgpu::ComputePipeline,
+    pub spike_bucket_pipeline: wgpu::ComputePipeline,
     pub layer1_inference_pipeline: wgpu::ComputePipeline,
     pub layer1_stdp_pipeline: wgpu::ComputePipeline,
     pub apply_stdp_deltas_pipeline: wgpu::ComputePipeline,
@@ -306,11 +304,11 @@ impl VisionSNN {
             compilation_options: Default::default(),
             cache: None,
         });
-        let epsilon_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
-            label: Some("Epsilon pipe"),
+        let spike_bucket_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("Spike bucket pipe"),
             layout: Some(&pipeline_layout),
             module: &shader,
-            entry_point: Some("update_epsilon"),
+            entry_point: Some("write_spike_counts"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -372,7 +370,7 @@ impl VisionSNN {
         });
         let spike_counter = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Spike Counter"),
-            size: 32,
+            size: 512 * 512 / 32 * 32 * 4, // 1024 bytes
             usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -384,7 +382,7 @@ impl VisionSNN {
         });
         let epsilon_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Epsilon Buffer"),
-            size: 4 * 2,
+            size: 512 * 512 * 2 * 4,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -569,7 +567,7 @@ impl VisionSNN {
             queue,
             shader,
             micro_tick_pipeline,
-            epsilon_pipeline,
+            spike_bucket_pipeline,
             layer1_inference_pipeline,
             layer1_stdp_pipeline,
             apply_stdp_deltas_pipeline,
@@ -656,25 +654,25 @@ impl VisionSNN {
             pass.set_bind_group(0, bind_group, &[]);
             pass.dispatch_workgroups(4, 512, 1);
 
-            // Inference pass
-            pass.set_pipeline(&self.layer1_inference_pipeline);
-            pass.set_bind_group(0, bind_group, &[]);
-            pass.dispatch_workgroups(512 / 256, 512, 8);
+            // // Inference pass
+            // pass.set_pipeline(&self.layer1_inference_pipeline);
+            // pass.set_bind_group(0, bind_group, &[]);
+            // pass.dispatch_workgroups(512 / 256, 512, 8);
 
-            // Update epsilon
-            pass.set_pipeline(&self.epsilon_pipeline);
+            // Update spike counters
+            pass.set_pipeline(&self.spike_bucket_pipeline);
             pass.set_bind_group(0, bind_group, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
-
-            // STDP pass
-            pass.set_pipeline(&self.layer1_stdp_pipeline);
-            pass.set_bind_group(0, bind_group, &[]);
-            pass.dispatch_workgroups(1, 8192 / 512, 1);
-
-            // Apply Deltas
-            pass.set_pipeline(&self.apply_stdp_deltas_pipeline);
-            pass.set_bind_group(0, bind_group, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
+            pass.dispatch_workgroups(4, 512, 1);
+            //
+            // // STDP pass
+            // pass.set_pipeline(&self.layer1_stdp_pipeline);
+            // pass.set_bind_group(0, bind_group, &[]);
+            // pass.dispatch_workgroups(1, 8192 / 512, 1);
+            //
+            // // Apply Deltas
+            // pass.set_pipeline(&self.apply_stdp_deltas_pipeline);
+            // pass.set_bind_group(0, bind_group, &[]);
+            // pass.dispatch_workgroups(1, 1, 1);
 
             drop(pass);
 
