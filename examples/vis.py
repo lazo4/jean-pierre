@@ -34,11 +34,11 @@ fps_counter = 0
 last_time = time.time()
 fps_display = "0 FPS"
 
+# frame = cv2.imread("assets/stripes.png")
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
         break
-
     # 1. Resize & convert BGR (OpenCV format) to RGBA (wgpu format)
     frame_resized = center_crop_square(frame)
     frame_rgba = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGBA)

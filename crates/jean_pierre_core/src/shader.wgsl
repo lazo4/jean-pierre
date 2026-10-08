@@ -28,10 +28,8 @@ fn get_luminance(coords: vec2f) -> f32 {
     return dot(rgba.rgb, vec3f(0.2126, 0.7152, 0.0722));
 }
 
-const DECAY: f32 = 0.001;  // Smooth threshold decrease rate
-const SPIKE: f32 = 0.019;  // 19 * DECAY -> 5% steady-state density
-const SODIUM_DECAY: f32 = 0.10;
-const SODIUM_SPIKE: f32 = 0.30;
+const DECAY: f32 = 0.0001;  // Smooth threshold decrease rate
+const SPIKE: f32 = 0.0019;  // 19 * DECAY -> 5% steady-state density
 const EPSILON_BASE: f32 = 0.01;
 
 // Each thread processes 1 pixel. Pixels are then aggregated by subgroup into 8x4 windows
@@ -66,16 +64,20 @@ fn preprocess_frame(
     let is_off = diff < -off_epsilon;
     let is_on = diff > on_epsilon;
 
-    if !is_off {
-        input_epsilon[epsilon_idx] = max((off_epsilon * SODIUM_DECAY) - DECAY, EPSILON_BASE);
+    if is_off {
+        let overshot = off_epsilon + diff;
+        input_epsilon[epsilon_idx] = off_epsilon + max(overshot * 1.01, SPIKE);
     } else {
-        input_epsilon[epsilon_idx] = off_epsilon + SPIKE + SODIUM_SPIKE;
+        let undershot = diff - off_epsilon;
+        input_epsilon[epsilon_idx] = max(off_epsilon - DECAY, EPSILON_BASE);
     }
 
-    if !is_on {
-        input_epsilon[epsilon_idx + 1] = max((off_epsilon * SODIUM_DECAY) - DECAY, EPSILON_BASE);
+    if is_on {
+        let overshot = diff - on_epsilon;
+        input_epsilon[epsilon_idx + 1] = on_epsilon + max(overshot * 1.01, SPIKE);
     } else {
-        input_epsilon[epsilon_idx + 1] = on_epsilon + SPIKE + SODIUM_SPIKE;
+        let undershot = on_epsilon - diff;
+        input_epsilon[epsilon_idx + 1] = max(on_epsilon - DECAY, EPSILON_BASE);
     }
 
     let word_on = subgroupBallot(is_on).x;
