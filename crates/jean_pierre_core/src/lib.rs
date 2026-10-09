@@ -1,13 +1,16 @@
 use pollster::FutureExt;
-use rand::RngExt;
-use rand::distr::Uniform;
 use wgpu::{
-    BufferUsages, ComputePipelineDescriptor, Extent3d, Instance, Origin3d, ShaderModule,
-    ShaderModuleDescriptor,
+    BufferUsages, ComputePipelineDescriptor, Extent3d, Instance, Origin3d, ShaderModuleDescriptor,
 };
 
-use crate::saccade::SaccadeGenerator;
+use crate::{
+    bindgroup_layout::init_bindgroup_layout, convlayer::ConvLayer,
+    preprocessing::PreprocessingLayer, saccade::SaccadeGenerator,
+};
 
+mod bindgroup_layout;
+mod convlayer;
+mod preprocessing;
 mod saccade;
 mod spike_decoder;
 
@@ -56,207 +59,11 @@ impl GpuContext {
     }
 }
 
-pub struct PreprocessingLayer {
-    input_frame_texture: wgpu::Texture,
-    input_frame_view: wgpu::TextureView,
-    input_sampler: wgpu::Sampler,
-    prev_output: wgpu::Buffer,
-    next_output: wgpu::Buffer,
-    micro_tick_pipeline: wgpu::ComputePipeline,
-}
-
-impl PreprocessingLayer {
-    pub fn new(
-        gpu_ctx: &GpuContext,
-        shader: &ShaderModule,
-        pipeline_layout: &wgpu::PipelineLayout,
-        crop_size: u32,
-    ) -> Self {
-        let input_frame_texture = gpu_ctx.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Input frame texture"),
-            size: Extent3d {
-                width: crop_size,
-                height: crop_size,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-
-        let input_frame_view =
-            input_frame_texture.create_view(&wgpu::wgt::TextureViewDescriptor::default());
-        let input_sampler = gpu_ctx.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Input Sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-
-        let prev_output = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Output Buffer"),
-            size: crop_size as u64 * crop_size as u64 / 4,
-            usage: BufferUsages::COPY_DST | BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
-        let next_output = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Output Buffer"),
-            size: crop_size as u64 * crop_size as u64 / 4,
-            usage: BufferUsages::COPY_DST | BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
-        let micro_tick_pipeline =
-            gpu_ctx
-                .device
-                .create_compute_pipeline(&ComputePipelineDescriptor {
-                    label: Some("Compute pipe"),
-                    layout: Some(&pipeline_layout),
-                    module: &shader,
-                    entry_point: Some("preprocess_frame"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                });
-
-        Self {
-            input_frame_texture,
-            input_frame_view,
-            input_sampler,
-            prev_output,
-            next_output,
-            micro_tick_pipeline,
-        }
-    }
-}
-
-pub struct ConvLayer {
-    inference_pipeline: wgpu::ComputePipeline,
-    stdp_pipeline: wgpu::ComputePipeline,
-    apply_stdp_deltas_pipeline: wgpu::ComputePipeline,
-    activations: wgpu::Buffer,
-    next_activations: wgpu::Buffer,
-    weights: wgpu::Buffer,
-    next_weights: wgpu::Buffer,
-    weight_deltas: wgpu::Buffer,
-}
-
-impl ConvLayer {
-    pub fn new(
-        gpu_ctx: &GpuContext,
-        shader: &ShaderModule,
-        pipeline_layout: &wgpu::PipelineLayout,
-        crop_size: u32,
-    ) -> Self {
-        let inference_pipeline =
-            gpu_ctx
-                .device
-                .create_compute_pipeline(&ComputePipelineDescriptor {
-                    label: Some("Layer 1 inference pipe"),
-                    layout: Some(&pipeline_layout),
-                    module: &shader,
-                    entry_point: Some("inference"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                });
-        let stdp_pipeline = gpu_ctx
-            .device
-            .create_compute_pipeline(&ComputePipelineDescriptor {
-                label: Some("Layer 1 STDP pipe"),
-                layout: Some(&pipeline_layout),
-                module: &shader,
-                entry_point: Some("compute_stdp_deltas"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-        let apply_stdp_deltas_pipeline =
-            gpu_ctx
-                .device
-                .create_compute_pipeline(&ComputePipelineDescriptor {
-                    label: Some("Apply STDP pipe"),
-                    layout: Some(&pipeline_layout),
-                    module: &shader,
-                    entry_point: Some("apply_stdp_deltas"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                });
-
-        let activations = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Layer 1 Activations"),
-            size: crop_size as u64 * crop_size as u64,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let next_activations = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Layer 1 Next Activations"),
-            size: crop_size as u64 * crop_size as u64,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
-        let weights = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Layer 1 Vertical Weights"),
-            // 2 input channels 8 rows, 8 columns, 8 kernels
-            size: 5 * 5 * 8 * 2,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
-        let mut rng = rand::rng();
-        let range = Uniform::new(-20, 20).unwrap();
-
-        let vals: Vec<i8> = (0..(5 * 5 * 8 * 2)).map(|_| rng.sample(range)).collect();
-        // let mut vals: Vec<i8> = vec![0; 5 * 5 * 8 * 2];
-        // vals[0..5].copy_from_slice(&[-54, -27, 0, 27, 54]);
-        // vals[5..10].copy_from_slice(&[-54, -27, 0, 27, 54]);
-        // vals[10..15].copy_from_slice(&[-108, -54, 0, 54, 108]);
-        // vals[15..20].copy_from_slice(&[-54, -27, 0, 27, 54]);
-        // vals[20..25].copy_from_slice(&[-54, -27, 0, 27, 54]);
-        gpu_ctx
-            .queue
-            .write_buffer(&weights, 0, bytemuck::cast_slice(&vals));
-
-        let next_weights = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Layer 1 Next Vertical Weights"),
-            // 5 rows, 5 columns 8 kernels, 2 input channels
-            size: 5 * 5 * 8 * 2,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let weight_deltas = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Layer 1 Vertical Deltas"),
-            size: 5 * 5 * 8 * 2 * 4, // 5 rows, 5 columns, 8 kernels, 4 bytes per delta
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        Self {
-            inference_pipeline,
-            stdp_pipeline,
-            apply_stdp_deltas_pipeline,
-            activations,
-            next_activations,
-            weights,
-            next_weights,
-            weight_deltas,
-        }
-    }
-}
-
 pub struct VisionSNN {
     gpu_ctx: GpuContext,
     preprocessing_layer: PreprocessingLayer,
     layer1: ConvLayer,
-    spike_bucket_pipeline: wgpu::ComputePipeline,
     params_buf: wgpu::Buffer,
-    epsilon_buf: wgpu::Buffer,
     ping_bind_group: wgpu::BindGroup,
     pong_bind_group: wgpu::BindGroup,
     staging_output: wgpu::Buffer,
@@ -265,121 +72,6 @@ pub struct VisionSNN {
     saccade_generator: saccade::SaccadeGenerator<rand::rngs::SmallRng>,
     global_iterations: u32,
     crop_size: u32,
-}
-
-fn init_bindgroup_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: None,
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: Default::default(),
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 3,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 4,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 5,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 6,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 7,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 8,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 9,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 10,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-        ],
-    });
-    bind_group_layout
 }
 
 impl VisionSNN {
@@ -572,9 +264,7 @@ impl VisionSNN {
             gpu_ctx,
             preprocessing_layer,
             layer1,
-            spike_bucket_pipeline,
             params_buf,
-            epsilon_buf,
             staging_output,
             staging_layer1_activations,
             staging_layer1_vertical_weights,
@@ -649,22 +339,22 @@ impl VisionSNN {
             pass.dispatch_workgroups(4, self.crop_size, 1);
 
             // // Inference pass
-            // pass.set_pipeline(&self.layer1_inference_pipeline);
+            // pass.set_pipeline(&self.layer1.inference_pipeline);
             // pass.set_bind_group(0, bind_group, &[]);
             // pass.dispatch_workgroups(self.crop_size / 256, self.crop_size, 8);
-
-            // Update spike counters
-            pass.set_pipeline(&self.spike_bucket_pipeline);
-            pass.set_bind_group(0, bind_group, &[]);
-            pass.dispatch_workgroups(4, self.crop_size, 1);
+            //
+            // // Update spike counters
+            // pass.set_pipeline(&self.spike_bucket_pipeline);
+            // pass.set_bind_group(0, bind_group, &[]);
+            // pass.dispatch_workgroups(4, self.crop_size, 1);
             //
             // // STDP pass
-            // pass.set_pipeline(&self.layer1_stdp_pipeline);
+            // pass.set_pipeline(&self.layer1.stdp_pipeline);
             // pass.set_bind_group(0, bind_group, &[]);
             // pass.dispatch_workgroups(1, 8192 / self.crop_size, 1);
             //
             // // Apply Deltas
-            // pass.set_pipeline(&self.apply_stdp_deltas_pipeline);
+            // pass.set_pipeline(&self.layer1.apply_stdp_deltas_pipeline);
             // pass.set_bind_group(0, bind_group, &[]);
             // pass.dispatch_workgroups(1, 1, 1);
 
