@@ -9,6 +9,7 @@ use wgpu::{
 use crate::saccade::SaccadeGenerator;
 
 mod saccade;
+mod spike_decoder;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -18,8 +19,6 @@ struct FrameParams {
     saccade_x: f32,
     saccade_y: f32,
 }
-
-mod spike_decoder;
 
 pub struct GpuContext {
     pub instance: Instance,
@@ -136,177 +135,25 @@ impl PreprocessingLayer {
     }
 }
 
-pub struct VisionSNN {
-    gpu_ctx: GpuContext,
-    preprocessing_layer: PreprocessingLayer,
-    spike_bucket_pipeline: wgpu::ComputePipeline,
-    layer1_inference_pipeline: wgpu::ComputePipeline,
-    layer1_stdp_pipeline: wgpu::ComputePipeline,
+pub struct ConvLayer {
+    inference_pipeline: wgpu::ComputePipeline,
+    stdp_pipeline: wgpu::ComputePipeline,
     apply_stdp_deltas_pipeline: wgpu::ComputePipeline,
-    params_buf: wgpu::Buffer,
-    epsilon_buf: wgpu::Buffer,
-    ping_bind_group: wgpu::BindGroup,
-    pong_bind_group: wgpu::BindGroup,
-    staging_output: wgpu::Buffer,
-    staging_layer1_activations: wgpu::Buffer,
-    staging_layer1_vertical_weights: wgpu::Buffer,
-    layer1_activations: wgpu::Buffer,
-    layer1_next_activations: wgpu::Buffer,
-    layer1_vertical_weights: wgpu::Buffer,
-    layer1_next_vertical_weights: wgpu::Buffer,
-    layer1_vertical_deltas: wgpu::Buffer,
-    saccade_generator: saccade::SaccadeGenerator<rand::rngs::SmallRng>,
-    global_iterations: u32,
-    crop_size: u32,
+    activations: wgpu::Buffer,
+    next_activations: wgpu::Buffer,
+    weights: wgpu::Buffer,
+    next_weights: wgpu::Buffer,
+    weight_deltas: wgpu::Buffer,
 }
 
-impl VisionSNN {
-    pub fn new(crop_size: u32) -> Self {
-        let gpu_ctx = GpuContext::new();
-
-        let shader = gpu_ctx.device.create_shader_module(ShaderModuleDescriptor {
-            label: None,
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-        });
-        let bind_group_layout =
-            gpu_ctx
-                .device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: None,
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Texture {
-                                sample_type: Default::default(),
-                                view_dimension: wgpu::TextureViewDimension::D2,
-                                multisampled: false,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 2,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 3,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 4,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 5,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 6,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 7,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 8,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 9,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 10,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                    ],
-                });
-
-        let pipeline_layout =
-            gpu_ctx
-                .device
-                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: None,
-                    bind_group_layouts: &[Some(&bind_group_layout)],
-                    immediate_size: 0,
-                });
-
-        let preprocessing_layer =
-            PreprocessingLayer::new(&gpu_ctx, &shader, &pipeline_layout, crop_size);
-
-        let spike_bucket_pipeline =
-            gpu_ctx
-                .device
-                .create_compute_pipeline(&ComputePipelineDescriptor {
-                    label: Some("Spike bucket pipe"),
-                    layout: Some(&pipeline_layout),
-                    module: &shader,
-                    entry_point: Some("write_spike_counts"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                });
-        let layer1_inference_pipeline =
+impl ConvLayer {
+    pub fn new(
+        gpu_ctx: &GpuContext,
+        shader: &ShaderModule,
+        pipeline_layout: &wgpu::PipelineLayout,
+        crop_size: u32,
+    ) -> Self {
+        let inference_pipeline =
             gpu_ctx
                 .device
                 .create_compute_pipeline(&ComputePipelineDescriptor {
@@ -317,17 +164,16 @@ impl VisionSNN {
                     compilation_options: Default::default(),
                     cache: None,
                 });
-        let layer1_stdp_pipeline =
-            gpu_ctx
-                .device
-                .create_compute_pipeline(&ComputePipelineDescriptor {
-                    label: Some("Layer 1 STDP pipe"),
-                    layout: Some(&pipeline_layout),
-                    module: &shader,
-                    entry_point: Some("compute_stdp_deltas"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                });
+        let stdp_pipeline = gpu_ctx
+            .device
+            .create_compute_pipeline(&ComputePipelineDescriptor {
+                label: Some("Layer 1 STDP pipe"),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("compute_stdp_deltas"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         let apply_stdp_deltas_pipeline =
             gpu_ctx
                 .device
@@ -339,40 +185,22 @@ impl VisionSNN {
                     compilation_options: Default::default(),
                     cache: None,
                 });
-        let spike_counter = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Spike Counter"),
-            size: crop_size as u64 * crop_size as u64 / 32 * 32 * 4, // 1024 bytes
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let params_buf = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Params Buffer"),
-            size: std::mem::size_of::<FrameParams>() as u64,
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let epsilon_buf = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Epsilon Buffer"),
-            size: crop_size as u64 * crop_size as u64 * 2 * 4,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
 
-        let layer1_activations = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        let activations = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Layer 1 Activations"),
             size: crop_size as u64 * crop_size as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        let layer1_next_activations = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        let next_activations = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Layer 1 Next Activations"),
             size: crop_size as u64 * crop_size as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
-        let layer1_vertical_weights = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        let weights = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Layer 1 Vertical Weights"),
             // 2 input channels 8 rows, 8 columns, 8 kernels
             size: 5 * 5 * 8 * 2,
@@ -392,9 +220,9 @@ impl VisionSNN {
         // vals[20..25].copy_from_slice(&[-54, -27, 0, 27, 54]);
         gpu_ctx
             .queue
-            .write_buffer(&layer1_vertical_weights, 0, bytemuck::cast_slice(&vals));
+            .write_buffer(&weights, 0, bytemuck::cast_slice(&vals));
 
-        let layer1_next_vertical_weights = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        let next_weights = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Layer 1 Next Vertical Weights"),
             // 5 rows, 5 columns 8 kernels, 2 input channels
             size: 5 * 5 * 8 * 2,
@@ -402,9 +230,203 @@ impl VisionSNN {
             mapped_at_creation: false,
         });
 
-        let layer1_vertical_deltas = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        let weight_deltas = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Layer 1 Vertical Deltas"),
             size: 5 * 5 * 8 * 2 * 4, // 5 rows, 5 columns, 8 kernels, 4 bytes per delta
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            inference_pipeline,
+            stdp_pipeline,
+            apply_stdp_deltas_pipeline,
+            activations,
+            next_activations,
+            weights,
+            next_weights,
+            weight_deltas,
+        }
+    }
+}
+
+pub struct VisionSNN {
+    gpu_ctx: GpuContext,
+    preprocessing_layer: PreprocessingLayer,
+    layer1: ConvLayer,
+    spike_bucket_pipeline: wgpu::ComputePipeline,
+    params_buf: wgpu::Buffer,
+    epsilon_buf: wgpu::Buffer,
+    ping_bind_group: wgpu::BindGroup,
+    pong_bind_group: wgpu::BindGroup,
+    staging_output: wgpu::Buffer,
+    staging_layer1_activations: wgpu::Buffer,
+    staging_layer1_vertical_weights: wgpu::Buffer,
+    saccade_generator: saccade::SaccadeGenerator<rand::rngs::SmallRng>,
+    global_iterations: u32,
+    crop_size: u32,
+}
+
+fn init_bindgroup_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: Default::default(),
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 7,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 8,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 9,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 10,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+    bind_group_layout
+}
+
+impl VisionSNN {
+    pub fn new(crop_size: u32) -> Self {
+        let gpu_ctx = GpuContext::new();
+
+        let shader = gpu_ctx.device.create_shader_module(ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+        });
+
+        let bind_group_layout = init_bindgroup_layout(&gpu_ctx.device);
+
+        let pipeline_layout =
+            gpu_ctx
+                .device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None,
+                    bind_group_layouts: &[Some(&bind_group_layout)],
+                    immediate_size: 0,
+                });
+
+        let preprocessing_layer =
+            PreprocessingLayer::new(&gpu_ctx, &shader, &pipeline_layout, crop_size);
+
+        let layer1 = ConvLayer::new(&gpu_ctx, &shader, &pipeline_layout, crop_size);
+
+        let spike_bucket_pipeline =
+            gpu_ctx
+                .device
+                .create_compute_pipeline(&ComputePipelineDescriptor {
+                    label: Some("Spike bucket pipe"),
+                    layout: Some(&pipeline_layout),
+                    module: &shader,
+                    entry_point: Some("write_spike_counts"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+        let params_buf = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Params Buffer"),
+            size: std::mem::size_of::<FrameParams>() as u64,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let epsilon_buf = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Epsilon Buffer"),
+            size: crop_size as u64 * crop_size as u64 * 2 * 4,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -445,23 +467,23 @@ impl VisionSNN {
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
-                        resource: layer1_activations.as_entire_binding(),
+                        resource: layer1.activations.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 7,
-                        resource: layer1_next_activations.as_entire_binding(),
+                        resource: layer1.next_activations.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 8,
-                        resource: layer1_vertical_weights.as_entire_binding(),
+                        resource: layer1.weights.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 9,
-                        resource: layer1_next_vertical_weights.as_entire_binding(),
+                        resource: layer1.next_weights.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 10,
-                        resource: layer1_vertical_deltas.as_entire_binding(),
+                        resource: layer1.weight_deltas.as_entire_binding(),
                     },
                 ],
             });
@@ -503,23 +525,23 @@ impl VisionSNN {
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
-                        resource: layer1_next_activations.as_entire_binding(),
+                        resource: layer1.next_activations.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 7,
-                        resource: layer1_activations.as_entire_binding(),
+                        resource: layer1.activations.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 8,
-                        resource: layer1_next_vertical_weights.as_entire_binding(),
+                        resource: layer1.next_weights.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 9,
-                        resource: layer1_vertical_weights.as_entire_binding(),
+                        resource: layer1.weights.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 10,
-                        resource: layer1_vertical_deltas.as_entire_binding(),
+                        resource: layer1.weight_deltas.as_entire_binding(),
                     },
                 ],
             });
@@ -549,10 +571,8 @@ impl VisionSNN {
         Self {
             gpu_ctx,
             preprocessing_layer,
+            layer1,
             spike_bucket_pipeline,
-            layer1_inference_pipeline,
-            layer1_stdp_pipeline,
-            apply_stdp_deltas_pipeline,
             params_buf,
             epsilon_buf,
             staging_output,
@@ -561,11 +581,6 @@ impl VisionSNN {
             ping_bind_group,
             pong_bind_group,
             saccade_generator: SaccadeGenerator::new(rand::make_rng()),
-            layer1_activations,
-            layer1_next_activations,
-            layer1_vertical_weights,
-            layer1_next_vertical_weights,
-            layer1_vertical_deltas,
             crop_size,
             global_iterations: 0,
         }
@@ -672,14 +687,14 @@ impl VisionSNN {
             None,
         );
         encoder.copy_buffer_to_buffer(
-            &self.layer1_next_activations,
+            &self.layer1.next_activations,
             0,
             &self.staging_layer1_activations,
             0,
             None,
         );
         encoder.copy_buffer_to_buffer(
-            &self.layer1_vertical_weights,
+            &self.layer1.weights,
             0,
             &self.staging_layer1_vertical_weights,
             0,
