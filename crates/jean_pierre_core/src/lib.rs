@@ -3,7 +3,8 @@ use pollster::FutureExt;
 use rand::RngExt;
 use rand::distr::Uniform;
 use wgpu::{
-    BufferUsages, ComputePipelineDescriptor, Extent3d, Instance, Origin3d, ShaderModuleDescriptor,
+    BufferUsages, ComputePipelineDescriptor, Extent3d, Instance, Origin3d, ShaderModule,
+    ShaderModuleDescriptor,
 };
 
 use rand::Rng;
@@ -122,7 +123,7 @@ pub fn decode_vertical_weights(words: &[u8], rows: u32, cols: u32) -> GrayImage 
     img
 }
 
-struct GpuContext {
+pub struct GpuContext {
     pub instance: Instance,
     pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
@@ -158,35 +159,107 @@ impl GpuContext {
     }
 }
 
+pub struct PreprocessingLayer {
+    input_frame_texture: wgpu::Texture,
+    input_frame_view: wgpu::TextureView,
+    input_sampler: wgpu::Sampler,
+    prev_output: wgpu::Buffer,
+    next_output: wgpu::Buffer,
+    micro_tick_pipeline: wgpu::ComputePipeline,
+}
+
+impl PreprocessingLayer {
+    pub fn new(
+        gpu_ctx: &GpuContext,
+        shader: &ShaderModule,
+        pipeline_layout: &wgpu::PipelineLayout,
+        crop_size: u32,
+    ) -> Self {
+        let input_frame_texture = gpu_ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Input frame texture"),
+            size: Extent3d {
+                width: crop_size,
+                height: crop_size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        let input_frame_view =
+            input_frame_texture.create_view(&wgpu::wgt::TextureViewDescriptor::default());
+        let input_sampler = gpu_ctx.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Input Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let prev_output = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Output Buffer"),
+            size: crop_size as u64 * crop_size as u64 / 4,
+            usage: BufferUsages::COPY_DST | BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let next_output = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Output Buffer"),
+            size: crop_size as u64 * crop_size as u64 / 4,
+            usage: BufferUsages::COPY_DST | BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let micro_tick_pipeline =
+            gpu_ctx
+                .device
+                .create_compute_pipeline(&ComputePipelineDescriptor {
+                    label: Some("Compute pipe"),
+                    layout: Some(&pipeline_layout),
+                    module: &shader,
+                    entry_point: Some("preprocess_frame"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+
+        Self {
+            input_frame_texture,
+            input_frame_view,
+            input_sampler,
+            prev_output,
+            next_output,
+            micro_tick_pipeline,
+        }
+    }
+}
+
 pub struct VisionSNN {
-    pub gpu_ctx: GpuContext,
-    pub shader: wgpu::ShaderModule,
-    pub micro_tick_pipeline: wgpu::ComputePipeline,
-    pub spike_bucket_pipeline: wgpu::ComputePipeline,
-    pub layer1_inference_pipeline: wgpu::ComputePipeline,
-    pub layer1_stdp_pipeline: wgpu::ComputePipeline,
-    pub apply_stdp_deltas_pipeline: wgpu::ComputePipeline,
-    pub input_frame_texture: wgpu::Texture,
-    pub input_frame_view: wgpu::TextureView,
-    pub input_sampler: wgpu::Sampler,
-    pub layer1_input: wgpu::Buffer,
-    pub spike_counter: wgpu::Buffer,
-    pub params_buf: wgpu::Buffer,
-    pub epsilon_buf: wgpu::Buffer,
-    pub ping_bind_group: wgpu::BindGroup,
-    pub pong_bind_group: wgpu::BindGroup,
-    pub bind_group_layout: wgpu::BindGroupLayout,
-    pub staging_output: wgpu::Buffer,
-    pub staging_layer1_activations: wgpu::Buffer,
-    pub staging_layer1_vertical_weights: wgpu::Buffer,
-    pub layer1_activations: wgpu::Buffer,
-    pub layer1_next_activations: wgpu::Buffer,
-    pub layer1_vertical_weights: wgpu::Buffer,
-    pub layer1_next_vertical_weights: wgpu::Buffer,
-    pub layer1_vertical_deltas: wgpu::Buffer,
-    pub saccade_generator: SaccadeGenerator<rand::rngs::SmallRng>,
-    pub global_iterations: u32,
-    pub crop_size: u32,
+    gpu_ctx: GpuContext,
+    preprocessing_layer: PreprocessingLayer,
+    spike_bucket_pipeline: wgpu::ComputePipeline,
+    layer1_inference_pipeline: wgpu::ComputePipeline,
+    layer1_stdp_pipeline: wgpu::ComputePipeline,
+    apply_stdp_deltas_pipeline: wgpu::ComputePipeline,
+    params_buf: wgpu::Buffer,
+    epsilon_buf: wgpu::Buffer,
+    ping_bind_group: wgpu::BindGroup,
+    pong_bind_group: wgpu::BindGroup,
+    staging_output: wgpu::Buffer,
+    staging_layer1_activations: wgpu::Buffer,
+    staging_layer1_vertical_weights: wgpu::Buffer,
+    layer1_activations: wgpu::Buffer,
+    layer1_next_activations: wgpu::Buffer,
+    layer1_vertical_weights: wgpu::Buffer,
+    layer1_next_vertical_weights: wgpu::Buffer,
+    layer1_vertical_deltas: wgpu::Buffer,
+    saccade_generator: SaccadeGenerator<rand::rngs::SmallRng>,
+    global_iterations: u32,
+    crop_size: u32,
 }
 
 impl VisionSNN {
@@ -321,17 +394,9 @@ impl VisionSNN {
                     immediate_size: 0,
                 });
 
-        let micro_tick_pipeline =
-            gpu_ctx
-                .device
-                .create_compute_pipeline(&ComputePipelineDescriptor {
-                    label: Some("Compute pipe"),
-                    layout: Some(&pipeline_layout),
-                    module: &shader,
-                    entry_point: Some("preprocess_frame"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                });
+        let preprocessing_layer =
+            PreprocessingLayer::new(&gpu_ctx, &shader, &pipeline_layout, crop_size);
+
         let spike_bucket_pipeline =
             gpu_ctx
                 .device
@@ -376,36 +441,6 @@ impl VisionSNN {
                     compilation_options: Default::default(),
                     cache: None,
                 });
-        let input_frame_texture = gpu_ctx.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Input frame texture"),
-            size: Extent3d {
-                width: crop_size,
-                height: crop_size,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let input_frame_view =
-            input_frame_texture.create_view(&wgpu::wgt::TextureViewDescriptor::default());
-        let input_sampler = gpu_ctx.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Input Sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-        let layer1_input = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Output Buffer"),
-            size: crop_size as u64 * crop_size as u64 / 4,
-            usage: BufferUsages::COPY_DST | BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
         let spike_counter = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Spike Counter"),
             size: crop_size as u64 * crop_size as u64 / 32 * 32 * 4, // 1024 bytes
@@ -450,7 +485,7 @@ impl VisionSNN {
         let mut rng = rand::rng();
         let range = Uniform::new(-20, 20).unwrap();
 
-        let vals: Vec<i8> = (0..(5 * 5 * 8 * 2)).map(|_| rng.sample(&range)).collect();
+        let vals: Vec<i8> = (0..(5 * 5 * 8 * 2)).map(|_| rng.sample(range)).collect();
         // let mut vals: Vec<i8> = vec![0; 5 * 5 * 8 * 2];
         // vals[0..5].copy_from_slice(&[-54, -27, 0, 27, 54]);
         // vals[5..10].copy_from_slice(&[-54, -27, 0, 27, 54]);
@@ -484,19 +519,23 @@ impl VisionSNN {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&input_frame_view),
+                        resource: wgpu::BindingResource::TextureView(
+                            &preprocessing_layer.input_frame_view,
+                        ),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&input_sampler),
+                        resource: wgpu::BindingResource::Sampler(
+                            &preprocessing_layer.input_sampler,
+                        ),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: layer1_input.as_entire_binding(),
+                        resource: preprocessing_layer.prev_output.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: spike_counter.as_entire_binding(),
+                        resource: preprocessing_layer.next_output.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
@@ -538,19 +577,23 @@ impl VisionSNN {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&input_frame_view),
+                        resource: wgpu::BindingResource::TextureView(
+                            &preprocessing_layer.input_frame_view,
+                        ),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&input_sampler),
+                        resource: wgpu::BindingResource::Sampler(
+                            &preprocessing_layer.input_sampler,
+                        ),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: layer1_input.as_entire_binding(),
+                        resource: preprocessing_layer.next_output.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: spike_counter.as_entire_binding(),
+                        resource: preprocessing_layer.prev_output.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
@@ -607,17 +650,11 @@ impl VisionSNN {
 
         Self {
             gpu_ctx,
-            shader,
-            micro_tick_pipeline,
+            preprocessing_layer,
             spike_bucket_pipeline,
             layer1_inference_pipeline,
             layer1_stdp_pipeline,
             apply_stdp_deltas_pipeline,
-            input_frame_texture,
-            input_frame_view,
-            input_sampler,
-            layer1_input,
-            spike_counter,
             params_buf,
             epsilon_buf,
             staging_output,
@@ -625,7 +662,6 @@ impl VisionSNN {
             staging_layer1_vertical_weights,
             ping_bind_group,
             pong_bind_group,
-            bind_group_layout,
             saccade_generator: SaccadeGenerator::new(rand::make_rng()),
             layer1_activations,
             layer1_next_activations,
@@ -648,12 +684,12 @@ impl VisionSNN {
     ) {
         self.gpu_ctx.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.input_frame_texture,
+                texture: &self.preprocessing_layer.input_frame_texture,
                 mip_level: 0,
                 origin: Origin3d::ZERO,
                 aspect: Default::default(),
             },
-            &input_frame,
+            input_frame,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(self.crop_size * 4),
@@ -685,7 +721,7 @@ impl VisionSNN {
                 .queue
                 .write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
 
-            let bind_group = if self.global_iterations % 2 == 0 {
+            let bind_group = if self.global_iterations.is_multiple_of(2) {
                 &self.ping_bind_group
             } else {
                 &self.pong_bind_group
@@ -695,7 +731,7 @@ impl VisionSNN {
                 label: None,
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.micro_tick_pipeline);
+            pass.set_pipeline(&self.preprocessing_layer.micro_tick_pipeline);
             pass.set_bind_group(0, bind_group, &[]);
             pass.dispatch_workgroups(4, self.crop_size, 1);
 
@@ -730,7 +766,13 @@ impl VisionSNN {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-        encoder.copy_buffer_to_buffer(&self.layer1_input, 0, &self.staging_output, 0, None);
+        encoder.copy_buffer_to_buffer(
+            &self.preprocessing_layer.next_output,
+            0,
+            &self.staging_output,
+            0,
+            None,
+        );
         encoder.copy_buffer_to_buffer(
             &self.layer1_next_activations,
             0,

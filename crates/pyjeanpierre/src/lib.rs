@@ -26,11 +26,11 @@ mod pyjeanpierre {
             py: Python<'py>,
             input_frame: &[u8],
             micro_ticks: u32,
-        ) -> PyResult<(
+        ) -> (
             Bound<'py, PyBytes>,
             Bound<'py, PyBytes>,
             Bound<'py, PyBytes>,
-        )> {
+        ) {
             // 1. Allocate temporary vectors
             let mut retina_out = vec![0u8; self.crop_size * self.crop_size];
             let mut layer1_out = vec![0u8; self.crop_size * self.crop_size];
@@ -51,7 +51,7 @@ mod pyjeanpierre {
             let layer1_weights_bytes = PyBytes::new(py, &layer1_weights_out);
 
             // 4. Return as a Python tuple
-            Ok((retina_bytes, layer1_bytes, layer1_weights_bytes))
+            (retina_bytes, layer1_bytes, layer1_weights_bytes)
         }
     }
 }
