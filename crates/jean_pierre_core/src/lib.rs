@@ -7,40 +7,9 @@ use wgpu::{
     ShaderModuleDescriptor,
 };
 
-use rand::Rng;
+use crate::saccade::SaccadeGenerator;
 
-pub struct SaccadeGenerator<T: Rng> {
-    pub x: f32,
-    pub y: f32,
-    decay: f32,     // Restoring force toward center (0.0, 0.0)
-    step_size: f32, // Drift velocity scale (sub-pixel)
-    rng: T,
-}
-
-impl<T: Rng> SaccadeGenerator<T> {
-    pub fn new(rng: T) -> Self {
-        Self {
-            x: 0.0,
-            y: 0.0,
-            decay: 0.85,     // Pulls back to center each tick
-            step_size: 0.15, // Max ~0.15 pixel step per frame
-            rng,
-        }
-    }
-
-    /// Call this every game loop frame tick (e.g., at 60 FPS)
-    pub fn update(&mut self) -> (f32, f32) {
-        // 1. Add random Gaussian-like step
-        let dx: f32 = self.rng.random_range(-self.step_size..self.step_size);
-        let dy: f32 = self.rng.random_range(-self.step_size..self.step_size);
-
-        // 2. Apply step + decay (prevents the image from drifting off to infinity)
-        self.x = (self.x + dx) * self.decay;
-        self.y = (self.y + dy) * self.decay;
-
-        (self.x, self.y)
-    }
-}
+mod saccade;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -257,7 +226,7 @@ pub struct VisionSNN {
     layer1_vertical_weights: wgpu::Buffer,
     layer1_next_vertical_weights: wgpu::Buffer,
     layer1_vertical_deltas: wgpu::Buffer,
-    saccade_generator: SaccadeGenerator<rand::rngs::SmallRng>,
+    saccade_generator: saccade::SaccadeGenerator<rand::rngs::SmallRng>,
     global_iterations: u32,
     crop_size: u32,
 }
