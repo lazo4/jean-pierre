@@ -8,9 +8,8 @@ struct FrameParams {
 @group(0) @binding(0) var raw_frame: texture_2d<f32>;
 @group(0) @binding(1) var input_sampler: sampler;
 // Channel packed, so even channels have OFF bits and odd channels have ON bits
-// Each word is an 8x4 rectangle of pixels, to improve memory locality
 @group(0) @binding(2) var<storage, read_write> layer1_input: array<u32>;
-@group(0) @binding(3) var<storage, read_write> spike_counter: array<f32>;
+@group(0) @binding(3) var<storage, read_write> layer1_next_input: array<u32>;
 @group(0) @binding(4) var<uniform> params: FrameParams;
 @group(0) @binding(5) var<storage, read_write> input_epsilon: array<f32>;
 
@@ -92,10 +91,8 @@ fn preprocess_frame(
     }
 }
 
-const TOTAL_INPUT_NEURONS: u32 = 512 * 512 * 2;
 const DECAY_1: f32 = 1;
 const SPIKE_1: f32 = 19;
-const TOTAL_LAYER1_NEURONS: u32 = 512 * 512 * 8;
 
 @compute @workgroup_size(256, 1, 1)
 fn write_spike_counts(

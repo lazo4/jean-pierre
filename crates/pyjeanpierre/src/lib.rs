@@ -8,14 +8,16 @@ mod pyjeanpierre {
     #[pyclass]
     struct VisionSNN {
         inner: jean_pierre_core::VisionSNN,
+        crop_size: usize,
     }
 
     #[pymethods]
     impl VisionSNN {
         #[new]
-        fn new() -> Self {
+        fn new(crop_size: usize) -> Self {
             Self {
-                inner: jean_pierre_core::VisionSNN::new(),
+                inner: jean_pierre_core::VisionSNN::new(crop_size as u32),
+                crop_size,
             }
         }
 
@@ -30,8 +32,8 @@ mod pyjeanpierre {
             Bound<'py, PyBytes>,
         )> {
             // 1. Allocate temporary vectors
-            let mut retina_out = vec![0u8; 512 * 512];
-            let mut layer1_out = vec![0u8; 512 * 512];
+            let mut retina_out = vec![0u8; self.crop_size * self.crop_size];
+            let mut layer1_out = vec![0u8; self.crop_size * self.crop_size];
             let mut layer1_weights_out = vec![0u8; 5 * 5];
 
             // 2. Call your original function

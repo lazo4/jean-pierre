@@ -1,7 +1,7 @@
 use image::GrayImage;
 use pollster::FutureExt;
+use rand::RngExt;
 use rand::distr::Uniform;
-use rand::{RngExt, random};
 use wgpu::{
     BufferUsages, ComputePipelineDescriptor, Extent3d, Instance, Origin3d, ShaderModuleDescriptor,
 };
@@ -153,10 +153,11 @@ pub struct VisionSNN {
     pub layer1_vertical_deltas: wgpu::Buffer,
     pub saccade_generator: SaccadeGenerator<rand::rngs::SmallRng>,
     pub global_iterations: u32,
+    pub crop_size: u32,
 }
 
 impl VisionSNN {
-    pub fn new() -> Self {
+    pub fn new(crop_size: u32) -> Self {
         // Init the wgpu pipeline
         let instance = Instance::default();
         let adapter = instance
@@ -341,8 +342,8 @@ impl VisionSNN {
         let input_frame_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Input frame texture"),
             size: Extent3d {
-                width: 512,
-                height: 512,
+                width: crop_size,
+                height: crop_size,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -364,13 +365,13 @@ impl VisionSNN {
         });
         let layer1_input = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Output Buffer"),
-            size: 512 * 512 / 4,
+            size: crop_size as u64 * crop_size as u64 / 4,
             usage: BufferUsages::COPY_DST | BufferUsages::STORAGE | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
         let spike_counter = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Spike Counter"),
-            size: 512 * 512 / 32 * 32 * 4, // 1024 bytes
+            size: crop_size as u64 * crop_size as u64 / 32 * 32 * 4, // 1024 bytes
             usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -382,21 +383,21 @@ impl VisionSNN {
         });
         let epsilon_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Epsilon Buffer"),
-            size: 512 * 512 * 2 * 4,
+            size: crop_size as u64 * crop_size as u64 * 2 * 4,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let layer1_activations = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Layer 1 Activations"),
-            size: 512 * 512,
+            size: crop_size as u64 * crop_size as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let layer1_next_activations = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Layer 1 Next Activations"),
-            size: 512 * 512,
+            size: crop_size as u64 * crop_size as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
@@ -541,14 +542,14 @@ impl VisionSNN {
 
         let staging_output = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Staging Output Buffer"),
-            size: (512 * 512 / 4) as u64, // 262,144 bytes
+            size: (crop_size * crop_size / 4) as u64, // 262,144 bytes
             usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
 
         let staging_layer1_activations = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Staging Layer 1 Activations"),
-            size: (512 * 512) as u64, // 262,144 bytes
+            size: crop_size as u64 * crop_size as u64, // 262,144 bytes
             usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -590,6 +591,7 @@ impl VisionSNN {
             layer1_vertical_weights,
             layer1_next_vertical_weights,
             layer1_vertical_deltas,
+            crop_size,
             global_iterations: 0,
         }
     }
@@ -613,12 +615,12 @@ impl VisionSNN {
             &input_frame,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(512 * 4),
+                bytes_per_row: Some(self.crop_size * 4),
                 rows_per_image: None,
             },
             Extent3d {
-                width: 512,
-                height: 512,
+                width: self.crop_size,
+                height: self.crop_size,
                 depth_or_array_layers: 1,
             },
         );
@@ -631,8 +633,8 @@ impl VisionSNN {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
             let (saccade_x, saccade_y) = self.saccade_generator.update();
             let params = FrameParams {
-                width: 512,
-                height: 512,
+                width: self.crop_size,
+                height: self.crop_size,
                 saccade_x,
                 saccade_y,
             };
@@ -652,22 +654,22 @@ impl VisionSNN {
             });
             pass.set_pipeline(&self.micro_tick_pipeline);
             pass.set_bind_group(0, bind_group, &[]);
-            pass.dispatch_workgroups(4, 512, 1);
+            pass.dispatch_workgroups(4, self.crop_size, 1);
 
             // // Inference pass
             // pass.set_pipeline(&self.layer1_inference_pipeline);
             // pass.set_bind_group(0, bind_group, &[]);
-            // pass.dispatch_workgroups(512 / 256, 512, 8);
+            // pass.dispatch_workgroups(self.crop_size / 256, self.crop_size, 8);
 
             // Update spike counters
             pass.set_pipeline(&self.spike_bucket_pipeline);
             pass.set_bind_group(0, bind_group, &[]);
-            pass.dispatch_workgroups(4, 512, 1);
+            pass.dispatch_workgroups(4, self.crop_size, 1);
             //
             // // STDP pass
             // pass.set_pipeline(&self.layer1_stdp_pipeline);
             // pass.set_bind_group(0, bind_group, &[]);
-            // pass.dispatch_workgroups(1, 8192 / 512, 1);
+            // pass.dispatch_workgroups(1, 8192 / self.crop_size, 1);
             //
             // // Apply Deltas
             // pass.set_pipeline(&self.apply_stdp_deltas_pipeline);
@@ -721,7 +723,7 @@ impl VisionSNN {
         let img = {
             let data = self.staging_output.get_mapped_range(..).unwrap();
             let words: &[u32] = bytemuck::cast_slice(&data);
-            decode_spike_words(words, 512, 512).to_vec()
+            decode_spike_words(words, self.crop_size, self.crop_size).to_vec()
         };
 
         let layer1_activations = {
@@ -730,7 +732,7 @@ impl VisionSNN {
                 .get_mapped_range(..)
                 .unwrap();
             let words: &[u32] = bytemuck::cast_slice(&data);
-            decode_activations(words, 512, 512, 8, 0).to_vec()
+            decode_activations(words, self.crop_size, self.crop_size, 8, 0).to_vec()
         };
 
         let layer1_vertical_weights = {
