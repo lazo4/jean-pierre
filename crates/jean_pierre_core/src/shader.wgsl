@@ -69,8 +69,8 @@ fn preprocess_frame(
         let words_per_row = params.width / 32u;
         let row_offset = x / 32u;
         let word_index = (y * words_per_row + row_offset) * 2u;
-        layer1_input[word_index] = word_off;
-        layer1_input[word_index + 1] = word_on;
+        layer1_next_input[word_index] = word_off;
+        layer1_next_input[word_index + 1] = word_on;
     }
 }
 
@@ -117,8 +117,10 @@ fn set_weight(idx: u32, val: i32) {
     layer1_next_vertical_weights[idx / 4u] = pack4xI8(weightvec);
 }
 
+const INFERENCE_EPSILON_BASE = 20;
+
 // Compute the inference pass of the V1 exploiting the power of subgroups
-@compute @workgroup_size(256, 1, 1)
+@compute @workgroup_size(128, 1, 1)
 fn inference(
     @builtin(global_invocation_id) global_id: vec3u,
     @builtin(subgroup_invocation_id) lane_id: u32,
@@ -186,17 +188,18 @@ fn inference(
         accum += select(0, get_weight(w_base + 3u), act_p1);
         accum += select(0, get_weight(w_base + 4u), act_p2);
     }
+
     // Threshold the sum and write the result
-    /*let activations = subgroupBallot(f32(accum) > epsilon[1]).x;
+    let activations = subgroupBallot(f32(accum) > INFERENCE_EPSILON_BASE).x;
     if lane_id == 0u {
         let words_per_row = params.width / 32u;
         let row_offset = global_id.x / 32u;
         let word_index = (global_id.y * words_per_row + row_offset) * 8u;
         layer1_next_activations[word_index + global_id.z] = activations;
-    }*/
+    }
 }
 
-const ETA = 0.001;
+const ETA = 0.01;
 const PIXELS_PER_WORKGROUP = 256 * 32;
 
 @compute @workgroup_size(256, 1, 1)
@@ -229,13 +232,18 @@ fn compute_stdp_deltas(
         let word_index = (u32(presyn_y) * words_per_row + row_offset) * 2u;
 
         let presyn_word_curr = layer1_input[word_index + 1];
+        let next_presyn_word_curr = layer1_next_input[word_index + 1];
         var presyn_word_prev = 0u;
+        var next_presyn_word_prev = 0u;
         var presyn_word_next = 0u;
+        var next_presyn_word_next = 0u;
         if row_offset > 0u {
             presyn_word_prev = layer1_input[word_index - 2 + 1];
+            next_presyn_word_prev = layer1_next_input[word_index - 2 + 1];
         }
         if row_offset + 2u + 1 < words_per_row {
             presyn_word_next = layer1_input[word_index + 2 + 1];
+            next_presyn_word_next = layer1_next_input[word_index + 2 + 1];
         }
 
         for (var rx = -2; rx <= 2; rx++) {
@@ -243,18 +251,21 @@ fn compute_stdp_deltas(
 
             // --- Bit-Align Presynaptic Window for Offset rx ---
             var presyn: u32;
+            var next_presyn: u32;
             if rx < 0 {
                 let shift = u32(-rx);
                 presyn = (presyn_word_curr << shift) | (presyn_word_prev >> (32u - shift));
+                next_presyn = (next_presyn_word_curr << shift) | (next_presyn_word_prev >> (32u - shift));
             } else if rx > 0 {
                 let shift = u32(rx);
                 presyn = (presyn_word_curr >> shift) | (presyn_word_next << (32u - shift));
+                next_presyn = (next_presyn_word_curr >> shift) | (next_presyn_word_next << (32u - shift));
             } else {
                 presyn = presyn_word_curr;
+                next_presyn = next_presyn_word_curr;
             }
 
             let prev_presyn = presyn;
-            let next_presyn = prev_presyn; // TODO: Soundness: Previous and next inputs should be separate too...
 
             // The beautiful part
             let delta = i32(countOneBits(prev_presyn & next_postsyn)) - i32(countOneBits(next_presyn & prev_postsyn));

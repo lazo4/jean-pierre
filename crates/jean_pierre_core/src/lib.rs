@@ -311,25 +311,20 @@ impl VisionSNN {
             pass.set_bind_group(0, bind_group, &[]);
             pass.dispatch_workgroups(4, self.crop_size, 1);
 
-            // // Inference pass
-            // pass.set_pipeline(&self.layer1.inference_pipeline);
-            // pass.set_bind_group(0, bind_group, &[]);
-            // pass.dispatch_workgroups(self.crop_size / 256, self.crop_size, 8);
-            //
-            // // Update spike counters
-            // pass.set_pipeline(&self.spike_bucket_pipeline);
-            // pass.set_bind_group(0, bind_group, &[]);
-            // pass.dispatch_workgroups(4, self.crop_size, 1);
-            //
-            // // STDP pass
-            // pass.set_pipeline(&self.layer1.stdp_pipeline);
-            // pass.set_bind_group(0, bind_group, &[]);
-            // pass.dispatch_workgroups(1, 8192 / self.crop_size, 1);
-            //
-            // // Apply Deltas
-            // pass.set_pipeline(&self.layer1.apply_stdp_deltas_pipeline);
-            // pass.set_bind_group(0, bind_group, &[]);
-            // pass.dispatch_workgroups(1, 1, 1);
+            // Inference pass
+            pass.set_pipeline(&self.layer1.inference_pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.dispatch_workgroups(self.crop_size / 128, self.crop_size, 8);
+
+            // STDP pass
+            pass.set_pipeline(&self.layer1.stdp_pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.dispatch_workgroups(1, 8192 / self.crop_size, 1);
+
+            // Apply Deltas
+            pass.set_pipeline(&self.layer1.apply_stdp_deltas_pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
 
             drop(pass);
 
