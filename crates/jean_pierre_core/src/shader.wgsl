@@ -11,7 +11,6 @@ struct FrameParams {
 @group(0) @binding(2) var<storage, read_write> layer1_input: array<u32>;
 @group(0) @binding(3) var<storage, read_write> layer1_next_input: array<u32>;
 @group(0) @binding(4) var<uniform> params: FrameParams;
-@group(0) @binding(5) var<storage, read_write> input_epsilon: array<f32>;
 
 fn get_luminance(coords: vec2f) -> f32 {
     let jittered_pos = coords + vec2f(params.saccade_x, params.saccade_y);
@@ -29,7 +28,7 @@ fn get_luminance(coords: vec2f) -> f32 {
 
 const DECAY: f32 = 0.0001;  // Smooth threshold decrease rate
 const SPIKE: f32 = 0.0019;  // 19 * DECAY -> 5% steady-state density
-const EPSILON_BASE: f32 = 0.01;
+const EPSILON_BASE: f32 = 0.02;
 
 // Each thread processes 1 pixel. Pixels are then aggregated by subgroup into 8x4 windows
 @compute @workgroup_size(256, 1, 1)
@@ -57,27 +56,11 @@ fn preprocess_frame(
     let diff = center_lum - (surround_sum * 0.11111111);
 
     let epsilon_idx = (y * params.width + x) * 2;
-    let off_epsilon = input_epsilon[epsilon_idx];
-    let on_epsilon = input_epsilon[epsilon_idx + 1];
+    let off_epsilon = EPSILON_BASE;
+    let on_epsilon = EPSILON_BASE;
 
     let is_off = diff < -off_epsilon;
     let is_on = diff > on_epsilon;
-
-    if is_off {
-        let overshot = off_epsilon + diff;
-        input_epsilon[epsilon_idx] = off_epsilon + max(overshot * 1.01, SPIKE);
-    } else {
-        let undershot = diff - off_epsilon;
-        input_epsilon[epsilon_idx] = max(off_epsilon - DECAY, EPSILON_BASE);
-    }
-
-    if is_on {
-        let overshot = diff - on_epsilon;
-        input_epsilon[epsilon_idx + 1] = on_epsilon + max(overshot * 1.01, SPIKE);
-    } else {
-        let undershot = on_epsilon - diff;
-        input_epsilon[epsilon_idx + 1] = max(on_epsilon - DECAY, EPSILON_BASE);
-    }
 
     let word_on = subgroupBallot(is_on).x;
     let word_off = subgroupBallot(is_off).x;

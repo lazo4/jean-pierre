@@ -71,4 +71,3 @@ pub fn decode_vertical_weights(words: &[u8], rows: u32, cols: u32) -> GrayImage 
 
     img
 }
-

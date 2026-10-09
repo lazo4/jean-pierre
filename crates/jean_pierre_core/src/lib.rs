@@ -1,7 +1,5 @@
 use pollster::FutureExt;
-use wgpu::{
-    BufferUsages, ComputePipelineDescriptor, Extent3d, Instance, Origin3d, ShaderModuleDescriptor,
-};
+use wgpu::{BufferUsages, Extent3d, Instance, Origin3d, ShaderModuleDescriptor};
 
 use crate::{
     bindgroup_layout::init_bindgroup_layout, convlayer::ConvLayer,
@@ -99,27 +97,10 @@ impl VisionSNN {
 
         let layer1 = ConvLayer::new(&gpu_ctx, &shader, &pipeline_layout, crop_size);
 
-        let spike_bucket_pipeline =
-            gpu_ctx
-                .device
-                .create_compute_pipeline(&ComputePipelineDescriptor {
-                    label: Some("Spike bucket pipe"),
-                    layout: Some(&pipeline_layout),
-                    module: &shader,
-                    entry_point: Some("write_spike_counts"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                });
         let params_buf = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Params Buffer"),
             size: std::mem::size_of::<FrameParams>() as u64,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let epsilon_buf = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Epsilon Buffer"),
-            size: crop_size as u64 * crop_size as u64 * 2 * 4,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -152,10 +133,6 @@ impl VisionSNN {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: params_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: epsilon_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
@@ -210,10 +187,6 @@ impl VisionSNN {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: params_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: epsilon_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,

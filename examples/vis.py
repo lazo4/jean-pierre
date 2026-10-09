@@ -6,6 +6,7 @@ from pyjeanpierre import VisionSNN
 
 MICRO_TICKS_PER_FRAME = 1
 CROP_SIZE = 128
+TILE_SIZE = 256
 
 
 def center_crop_square(frame, target_size=CROP_SIZE):
@@ -70,12 +71,22 @@ while cap.isOpened():
     activations_view = cv2.cvtColor(activations, cv2.COLOR_GRAY2BGR)
     weights_view = cv2.cvtColor(weights, cv2.COLOR_GRAY2BGR)
     weights_view = cv2.resize(
-        weights_view, (CROP_SIZE, CROP_SIZE), interpolation=cv2.INTER_NEAREST
+        weights_view, (TILE_SIZE, TILE_SIZE), interpolation=cv2.INTER_NEAREST
     )
 
     # Display side-by-side: Live iPhone Feed | GPU Retina Spikes
-    top = np.hstack((frame_resized, debug_view))
-    bottom = np.hstack((activations_view, weights_view))
+    top_left = cv2.resize(
+        frame_resized, (TILE_SIZE, TILE_SIZE), interpolation=cv2.INTER_NEAREST
+    )
+    top_right = cv2.resize(
+        debug_view, (TILE_SIZE, TILE_SIZE), interpolation=cv2.INTER_NEAREST
+    )
+    top = np.hstack((top_left, top_right))
+    bottom_left = cv2.resize(
+        activations_view, (TILE_SIZE, TILE_SIZE), interpolation=cv2.INTER_NEAREST
+    )
+    bottom_right = weights_view
+    bottom = np.hstack((bottom_left, bottom_right))
     combined = np.vstack((top, bottom))
     cv2.putText(
         combined, fps_display, (10, 250), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2
