@@ -62,7 +62,7 @@ impl ConvLayer {
         let activations = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Layer 1 Activations"),
             size: crop_size as u64 * crop_size as u64,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
@@ -99,7 +99,7 @@ impl ConvLayer {
             label: Some("Layer 1 Next Vertical Weights"),
             // 5 rows, 5 columns 8 kernels, 2 input channels
             size: 5 * 5 * 8 * 2,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 

@@ -245,7 +245,7 @@ impl VisionSNN {
             pong_bind_group,
             saccade_generator: SaccadeGenerator::new(rand::make_rng()),
             crop_size,
-            global_iterations: 0,
+            global_iterations: 1,
         }
     }
 
@@ -281,6 +281,7 @@ impl VisionSNN {
         // Run the microtick iterations
         for _ in 0..micro_ticks {
             self.global_iterations += 1;
+
             let mut encoder = self
                 .gpu_ctx
                 .device
@@ -337,22 +338,33 @@ impl VisionSNN {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
+        let (src_output, src_activations, src_weights) = if self.global_iterations.is_multiple_of(2)
+        {
+            // Ping finished: latest outputs are in the `next_*` buffers
+            (
+                &self.preprocessing_layer.next_output,
+                &self.layer1.next_activations,
+                &self.layer1.next_weights,
+            )
+        } else {
+            // Pong finished: latest outputs are in `prev_output`, `activations`, and `weights`
+            (
+                &self.preprocessing_layer.prev_output,
+                &self.layer1.activations,
+                &self.layer1.weights,
+            )
+        };
+
+        encoder.copy_buffer_to_buffer(src_output, 0, &self.staging_output, 0, None);
         encoder.copy_buffer_to_buffer(
-            &self.preprocessing_layer.next_output,
-            0,
-            &self.staging_output,
-            0,
-            None,
-        );
-        encoder.copy_buffer_to_buffer(
-            &self.layer1.next_activations,
+            src_activations,
             0,
             &self.staging_layer1_activations,
             0,
             None,
         );
         encoder.copy_buffer_to_buffer(
-            &self.layer1.weights,
+            src_weights,
             0,
             &self.staging_layer1_vertical_weights,
             0,

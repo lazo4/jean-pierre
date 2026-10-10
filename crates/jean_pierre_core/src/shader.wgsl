@@ -77,24 +77,6 @@ fn preprocess_frame(
 const DECAY_1: f32 = 1;
 const SPIKE_1: f32 = 19;
 
-@compute @workgroup_size(256, 1, 1)
-fn write_spike_counts(
-    @builtin(global_invocation_id) global_id: vec3u,
-) {
-    // NOTE: Since we have to keep our workgroups one dimensional, each workgroup is going to process several rows
-    let rows_per_workgroup = PIXELS_PER_WORKGROUP / params.width;
-    let y = global_id.y * rows_per_workgroup + (global_id.x * 32) / params.width;
-    let x_begin = (global_id.x * 32) % params.width;
-
-    if x_begin >= params.width || y >= params.height { return; }
-
-    let words_per_row = params.width / 32u;
-    let row_offset = x_begin / 32u;
-    let word_index = (y * words_per_row + row_offset) * 2u;
-
-    let x_center = f32(x_begin) + 15.5;
-}
-
 // Activations for layer 1
 @group(0) @binding(6) var<storage, read_write> layer1_activations: array<u32>;
 @group(0) @binding(7) var<storage, read_write> layer1_next_activations: array<u32>;
@@ -107,14 +89,6 @@ fn get_weight(idx: u32) -> i32 {
     let word = layer1_vertical_weights[idx / 4u];
     let weightvec = unpack4xI8(word);
     return weightvec[idx % 4u];
-}
-
-// TODO: Same as above
-fn set_weight(idx: u32, val: i32) {
-    let word = layer1_next_vertical_weights[idx / 4u];
-    var weightvec = unpack4xI8(word);
-    weightvec[idx % 4u] = val;
-    layer1_next_vertical_weights[idx / 4u] = pack4xI8(weightvec);
 }
 
 const INFERENCE_EPSILON_BASE = 20;
@@ -274,13 +248,20 @@ fn compute_stdp_deltas(
     }
 }
 
-@compute @workgroup_size(25, 1, 1)
+@compute @workgroup_size(7, 1, 1)
 fn apply_stdp_deltas(
     @builtin(global_invocation_id) global_id: vec3u,
 ) {
     let weight_idx = global_id.x;
-    let delta = atomicExchange(&layer1_vertical_deltas[weight_idx], 0);
-    let weight = clamp(get_weight(weight_idx) + i32(f32(delta) * ETA), -128, 127);
-    set_weight(weight_idx, weight);
+    var weights = unpack4xI8(layer1_vertical_weights[weight_idx]);
+
+    for (var i = 0u; i < 4u; i++) {
+        let idx = weight_idx * 4u + i;
+        if idx < 25u {
+            let delta = atomicExchange(&layer1_vertical_deltas[weight_idx], 0);
+            weights[i] = clamp(weights[i] + i32(f32(delta) * ETA), -128, 127);
+        }
+    }
+    layer1_next_vertical_weights[weight_idx] = pack4xI8(weights);
 }
 
