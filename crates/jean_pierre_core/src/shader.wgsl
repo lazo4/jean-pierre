@@ -28,7 +28,7 @@ fn get_luminance(coords: vec2f) -> f32 {
 
 const DECAY: f32 = 0.0001;  // Smooth threshold decrease rate
 const SPIKE: f32 = 0.0019;  // 19 * DECAY -> 5% steady-state density
-const EPSILON_BASE: f32 = 0.02;
+const EPSILON_BASE: f32 = 0.015;
 
 // Each thread processes 1 pixel. Pixels are then aggregated by subgroup into 8x4 windows
 @compute @workgroup_size(256, 1, 1)
@@ -91,7 +91,16 @@ fn get_weight(idx: u32) -> i32 {
     return weightvec[idx % 4u];
 }
 
-const INFERENCE_EPSILON_BASE = 20;
+// Count set bits of `word` at positions [lo, hi], clamped to [0, 31]
+fn bits_in(word: u32, lo: i32, hi: i32) -> u32 {
+    let l = max(lo, 0);
+    let h = min(hi, 31);
+    if l > h { return 0; }
+    return extractBits(word, u32(l), u32(h - l + 1));
+}
+
+const INFERENCE_EPSILON_BASE = 30;
+const WIDE_INHIBITION = 7;
 
 // Compute the inference pass of the V1 exploiting the power of subgroups
 @compute @workgroup_size(128, 1, 1)
@@ -161,6 +170,39 @@ fn inference(
         accum += select(0, get_weight(w_base + 2u), act_p0);
         accum += select(0, get_weight(w_base + 3u), act_p1);
         accum += select(0, get_weight(w_base + 4u), act_p2);
+    }
+
+    // Perform weak spacial competition over a 9x9 window
+    for (var dy = -4; dy <= 4; dy++) {
+        let word_y = u32(clamp(i32(y) + dy, 0, i32(params.height) - 1));
+        let row_offset = x / 32u;
+        let word_index = (word_y * words_per_row + row_offset) * 2u;
+
+        // 1. Fetch current 32-bit word for this subgroup (1 load covers all 32 threads)
+        let word_curr = layer1_activations[word_index + 1];
+        let word_prev = layer1_activations[word_index - 2 + 1];
+        let word_next = layer1_activations[word_index + 2 + 1];
+
+        let x_start = max(i32(x) - 4, 0);
+        let x_end = min(x + 4, params.width - 1);
+
+        let bit_start = x_start % 32;
+        let bit_end = i32(x_end) % 32;
+
+        if bit_start >= 28 {
+            let bits = bits_in(word_prev, bit_start, 31);
+            accum -= i32(countOneBits(bits)) * WIDE_INHIBITION;
+            let next_bits = bits_in(word_curr, 0, bit_end);
+            accum -= i32(countOneBits(next_bits)) * WIDE_INHIBITION;
+        } else if bit_end < 4 {
+            let bits = bits_in(word_next, 0, bit_end);
+            accum -= i32(countOneBits(bits)) * WIDE_INHIBITION;
+            let curr_bits = bits_in(word_curr, bit_start, 31);
+            accum -= i32(countOneBits(curr_bits)) * WIDE_INHIBITION;
+        } else {
+            let bits = bits_in(word_curr, bit_start, bit_end);
+            accum -= i32(countOneBits(bits)) * WIDE_INHIBITION;
+        }
     }
 
     // Threshold the sum and write the result
@@ -258,7 +300,7 @@ fn apply_stdp_deltas(
     for (var i = 0u; i < 4u; i++) {
         let idx = weight_idx * 4u + i;
         if idx < 25u {
-            let delta = atomicExchange(&layer1_vertical_deltas[weight_idx], 0);
+            let delta = atomicExchange(&layer1_vertical_deltas[idx], 0);
             weights[i] = clamp(weights[i] + i32(f32(delta) * ETA), -128, 127);
         }
     }
