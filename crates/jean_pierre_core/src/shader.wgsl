@@ -115,8 +115,9 @@ fn update_epsilon() {
 @group(0) @binding(11) var<storage, read_write> layer1_vertical_deltas: array<atomic<i32>>;
 
 // TODO: Process weights 4 at a time!!
-fn get_weight(idx: u32) -> i32 {
-    let word = layer1_vertical_weights[idx / 4u];
+fn get_weight(idx: u32, is_on: bool) -> i32 {
+    let word_idx = (idx / 4u) + u32(is_on) * 7;
+    let word = layer1_vertical_weights[word_idx];
     let weightvec = unpack4xI8(word);
     return weightvec[idx % 4u];
 }
@@ -149,54 +150,76 @@ fn inference(
         let word_index = (word_y * words_per_row + row_offset) * 2u;
 
         // 1. Fetch current 32-bit word for this subgroup (1 load covers all 32 threads)
-        let word_curr = layer1_input[word_index + 1];
-        let my_act = ((word_curr >> lane_id) & 1u);
+        let off_curr = layer1_input[word_index];
+        let on_curr = layer1_input[word_index + 1];
+        let my_off = ((off_curr >> lane_id) & 1u);
+        let my_on = ((on_curr >> lane_id) & 1u);
 
         // 2. Exchange activation bits across thread registers in 0 cycles
-        var act_m2 = subgroupShuffleUp(my_act, 2u) != 0u;
-        var act_m1 = subgroupShuffleUp(my_act, 1u) != 0u;
-        let act_p0 = my_act != 0u;
-        var act_p1 = subgroupShuffleDown(my_act, 1u) != 0u;
-        var act_p2 = subgroupShuffleDown(my_act, 2u) != 0u;
+        var off_m2 = subgroupShuffleUp(my_off, 2u) != 0u;
+        var on_m2 = subgroupShuffleUp(my_on, 2u) != 0u;
+        var off_m1 = subgroupShuffleUp(my_off, 1u) != 0u;
+        var on_m1 = subgroupShuffleUp(my_on, 1u) != 0u;
+        let off_p0 = my_off != 0u;
+        let on_p0 = my_on != 0u;
+        var off_p1 = subgroupShuffleDown(my_off, 1u) != 0u;
+        var on_p1 = subgroupShuffleDown(my_on, 1u) != 0u;
+        var off_p2 = subgroupShuffleDown(my_off, 2u) != 0u;
+        var on_p2 = subgroupShuffleDown(my_on, 2u) != 0u;
 
         // 3. Fallback loads for 32-bit word boundaries (lanes 0, 1, 30, 31)
         if lane_id < 2u {
             if row_offset > 0u {
-                let word_prev = layer1_input[word_index - 2 + 1];
+                let off_word_prev = layer1_input[word_index - 2];
+                let on_word_prev = layer1_input[word_index - 2 + 1];
                 if lane_id == 0u {
-                    act_m2 = ((word_prev >> 30u) & 1u) != 0u;
-                    act_m1 = ((word_prev >> 31u) & 1u) != 0u;
+                    off_m2 = ((off_word_prev >> 30u) & 1u) != 0u;
+                    on_m2 = ((on_word_prev >> 30u) & 1u) != 0u;
+                    off_m1 = ((off_word_prev >> 31u) & 1u) != 0u;
+                    on_m1 = ((on_word_prev >> 31u) & 1u) != 0u;
                 } else {
-                    act_m2 = ((word_prev >> 31u) & 1u) != 0u;
+                    off_m2 = ((off_word_prev >> 31u) & 1u) != 0u;
+                    on_m2 = ((on_word_prev >> 31u) & 1u) != 0u;
                 }
             } else {
-                act_m2 = false;
-                if lane_id == 0u { act_m1 = false; }
+                off_m2 = false;
+                on_m2 = false;
+                if lane_id == 0u { off_m1 = false; on_m1 = false; }
             }
         }
 
         if lane_id >= 30u {
             if row_offset + 2u + 1 < words_per_row {
-                let word_next = layer1_input[word_index + 2 + 1];
+                let off_word_next = layer1_input[word_index + 2];
+                let on_word_next = layer1_input[word_index + 2 + 1];
                 if lane_id == 31u {
-                    act_p1 = ((word_next >> 0u) & 1u) != 0u;
-                    act_p2 = ((word_next >> 1u) & 1u) != 0u;
+                    off_p1 = ((off_word_next >> 0u) & 1u) != 0u;
+                    on_p1 = ((on_word_next >> 0u) & 1u) != 0u;
+                    off_p2 = ((off_word_next >> 1u) & 1u) != 0u;
+                    on_p2 = ((on_word_next >> 1u) & 1u) != 0u;
                 } else {
-                    act_p2 = ((word_next >> 0u) & 1u) != 0u;
+                    off_p2 = ((off_word_next >> 0u) & 1u) != 0u;
+                    on_p2 = ((on_word_next >> 0u) & 1u) != 0u;
                 }
             } else {
-                act_p2 = false;
-                if lane_id == 31u { act_p1 = false; }
+                off_p2 = false;
+                on_p2 = false;
+                if lane_id == 31u { off_p1 = false; on_p1 = false; }
             }
         }
 
         // 4. Conditional accumulation via WGSL select() (no branching)
         let w_base = u32(ry + 2) * 5u;
-        accum += select(0, get_weight(w_base + 0u), act_m2);
-        accum += select(0, get_weight(w_base + 1u), act_m1);
-        accum += select(0, get_weight(w_base + 2u), act_p0);
-        accum += select(0, get_weight(w_base + 3u), act_p1);
-        accum += select(0, get_weight(w_base + 4u), act_p2);
+        accum += select(0, get_weight(w_base + 0u, false), off_m2);
+        accum += select(0, get_weight(w_base + 0u, true), on_m2);
+        accum += select(0, get_weight(w_base + 1u, false), off_m1);
+        accum += select(0, get_weight(w_base + 1u, true), on_m1);
+        accum += select(0, get_weight(w_base + 2u, false), off_p0);
+        accum += select(0, get_weight(w_base + 2u, true), on_p0);
+        accum += select(0, get_weight(w_base + 3u, false), off_p1);
+        accum += select(0, get_weight(w_base + 3u, true), on_p1);
+        accum += select(0, get_weight(w_base + 4u, false), off_p2);
+        accum += select(0, get_weight(w_base + 4u, true), on_p2);
     }
 
     // Threshold the sum and write the result
@@ -214,7 +237,7 @@ fn inference(
     }
 }
 
-const ETA = 0.008;
+const ETA = 0.005;
 const PIXELS_PER_WORKGROUP = 256 * 32;
 
 @compute @workgroup_size(256, 1, 1)
@@ -246,45 +269,68 @@ fn compute_stdp_deltas(
 
         let word_index = (u32(presyn_y) * words_per_row + row_offset) * 2u;
 
-        let presyn_word_curr = layer1_input[word_index + 1];
-        let next_presyn_word_curr = layer1_next_input[word_index + 1];
-        var presyn_word_prev = 0u;
-        var next_presyn_word_prev = 0u;
-        var presyn_word_next = 0u;
-        var next_presyn_word_next = 0u;
+        let presyn_off_curr = layer1_input[word_index];
+        let presyn_on_curr = layer1_input[word_index + 1];
+        let next_presyn_off_curr = layer1_next_input[word_index];
+        let next_presyn_on_curr = layer1_next_input[word_index + 1];
+        var presyn_off_prev = 0u;
+        var presyn_on_prev = 0u;
+        var next_presyn_off_prev = 0u;
+        var next_presyn_on_prev = 0u;
+        var presyn_off_next = 0u;
+        var presyn_on_next = 0u;
+        var next_presyn_off_next = 0u;
+        var next_presyn_on_next = 0u;
+
         if row_offset > 0u {
-            presyn_word_prev = layer1_input[word_index - 2 + 1];
-            next_presyn_word_prev = layer1_next_input[word_index - 2 + 1];
+            presyn_off_prev = layer1_input[word_index - 2];
+            presyn_on_prev = layer1_input[word_index - 2 + 1];
+            next_presyn_off_prev = layer1_next_input[word_index - 2];
+            next_presyn_on_prev = layer1_next_input[word_index - 2 + 1];
         }
         if row_offset + 2u + 1 < words_per_row {
-            presyn_word_next = layer1_input[word_index + 2 + 1];
-            next_presyn_word_next = layer1_next_input[word_index + 2 + 1];
+            presyn_off_next = layer1_input[word_index + 2];
+            presyn_on_next = layer1_input[word_index + 2 + 1];
+            next_presyn_off_next = layer1_next_input[word_index + 2];
+            next_presyn_on_next = layer1_next_input[word_index + 2 + 1];
         }
 
         for (var rx = -2; rx <= 2; rx++) {
-            let weight_idx = u32(ry + 2) * 5u + u32(rx + 2);
+            let off_weight_idx = u32(ry + 2) * 5u + u32(rx + 2);
+            let on_weight_idx = u32(ry + 2) * 5u + u32(rx + 2) + 25;
 
             // --- Bit-Align Presynaptic Window for Offset rx ---
-            var presyn: u32;
-            var next_presyn: u32;
+            var off_presyn: u32;
+            var on_presyn: u32;
+            var next_off_presyn: u32;
+            var next_on_presyn: u32;
             if rx < 0 {
                 let shift = u32(-rx);
-                presyn = (presyn_word_curr << shift) | (presyn_word_prev >> (32u - shift));
-                next_presyn = (next_presyn_word_curr << shift) | (next_presyn_word_prev >> (32u - shift));
+                off_presyn = (presyn_off_curr << shift) | (presyn_off_prev >> (32u - shift));
+                on_presyn = (presyn_on_curr << shift) | (presyn_on_prev >> (32u - shift));
+                next_off_presyn = (next_presyn_off_curr << shift) | (next_presyn_off_prev >> (32u - shift));
+                next_on_presyn = (next_presyn_on_curr << shift) | (next_presyn_on_prev >> (32u - shift));
             } else if rx > 0 {
                 let shift = u32(rx);
-                presyn = (presyn_word_curr >> shift) | (presyn_word_next << (32u - shift));
-                next_presyn = (next_presyn_word_curr >> shift) | (next_presyn_word_next << (32u - shift));
+                off_presyn = (presyn_off_curr >> shift) | (presyn_off_next << (32u - shift));
+                on_presyn = (presyn_on_curr >> shift) | (presyn_on_next << (32u - shift));
+                next_off_presyn = (next_presyn_off_curr >> shift) | (next_presyn_off_next << (32u - shift));
+                next_on_presyn = (next_presyn_on_curr >> shift) | (next_presyn_on_next << (32u - shift));
             } else {
-                presyn = presyn_word_curr;
-                next_presyn = next_presyn_word_curr;
+                off_presyn = presyn_off_curr;
+                on_presyn = presyn_on_curr;
+                next_off_presyn = next_presyn_off_curr;
+                next_on_presyn = next_presyn_on_curr;
             }
 
-            let prev_presyn = presyn;
+            let prev_off_presyn = off_presyn;
+            let prev_on_presyn = on_presyn;
 
             // The beautiful part
-            let delta = i32(countOneBits(prev_presyn & next_postsyn)) - i32(countOneBits(next_presyn & prev_postsyn));
-            atomicAdd(&layer1_vertical_deltas[weight_idx], delta);
+            let off_delta = i32(countOneBits(prev_off_presyn & next_postsyn)) - i32(countOneBits(next_off_presyn & prev_postsyn));
+            let on_delta = i32(countOneBits(prev_on_presyn & next_postsyn)) - i32(countOneBits(next_on_presyn & prev_postsyn));
+            atomicAdd(&layer1_vertical_deltas[off_weight_idx], off_delta);
+            atomicAdd(&layer1_vertical_deltas[on_weight_idx], on_delta);
         }
     }
 }
@@ -294,15 +340,20 @@ fn apply_stdp_deltas(
     @builtin(global_invocation_id) global_id: vec3u,
 ) {
     let weight_idx = global_id.x;
-    var weights = unpack4xI8(layer1_vertical_weights[weight_idx]);
+    var off_weights = unpack4xI8(layer1_vertical_weights[weight_idx]);
+    var on_weights = unpack4xI8(layer1_vertical_weights[weight_idx + 7]);
 
     for (var i = 0u; i < 4u; i++) {
-        let idx = weight_idx * 4u + i;
-        if idx < 25u {
-            let delta = atomicExchange(&layer1_vertical_deltas[idx], 0);
-            weights[i] = clamp(weights[i] + i32(f32(delta) * ETA), -128, 127);
+        let off_idx = weight_idx * 4u + i;
+        let on_idx = weight_idx * 4u + i + 25;
+        if off_idx < 25u {
+            let off_delta = atomicExchange(&layer1_vertical_deltas[off_idx], 0);
+            let on_delta = atomicExchange(&layer1_vertical_deltas[on_idx], 0);
+            off_weights[i] = clamp(off_weights[i] + i32(f32(off_delta) * ETA), -128, 127);
+            on_weights[i] = clamp(on_weights[i] + i32(f32(on_delta) * ETA), -128, 127);
         }
     }
-    layer1_next_vertical_weights[weight_idx] = pack4xI8(weights);
+    layer1_next_vertical_weights[weight_idx] = pack4xI8(off_weights);
+    layer1_next_vertical_weights[weight_idx + 7] = pack4xI8(on_weights);
 }
 
