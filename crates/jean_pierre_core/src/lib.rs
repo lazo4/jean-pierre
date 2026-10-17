@@ -40,7 +40,10 @@ impl GpuContext {
             .request_device(&wgpu::DeviceDescriptor {
                 label: None,
                 required_features: wgpu::Features::SUBGROUP,
-                required_limits: Default::default(),
+                required_limits: wgpu::Limits {
+                    max_storage_buffers_per_shader_stage: 16,
+                    ..Default::default()
+                },
                 experimental_features: Default::default(),
                 memory_hints: Default::default(),
                 trace: Default::default(),
@@ -62,6 +65,7 @@ pub struct VisionSNN {
     preprocessing_layer: PreprocessingLayer,
     layer1: ConvLayer,
     params_buf: wgpu::Buffer,
+    epsilon_pipeline: wgpu::ComputePipeline,
     ping_bind_group: wgpu::BindGroup,
     pong_bind_group: wgpu::BindGroup,
     staging_output: wgpu::Buffer,
@@ -104,6 +108,32 @@ impl VisionSNN {
             mapped_at_creation: false,
         });
 
+        let spike_counts = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Spike Counts Buffer"),
+            size: 4 * 2,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let epsilon_buf = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Epsilon Buffer"),
+            size: 2 * 4,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let epsilon_pipeline =
+            gpu_ctx
+                .device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("Epsilon Pipeline"),
+                    layout: Some(&pipeline_layout),
+                    module: &shader,
+                    entry_point: Some("update_epsilon"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+
         let ping_bind_group = gpu_ctx
             .device
             .create_bind_group(&wgpu::BindGroupDescriptor {
@@ -135,23 +165,31 @@ impl VisionSNN {
                         resource: params_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: epsilon_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
                         binding: 6,
-                        resource: layer1.activations.as_entire_binding(),
+                        resource: spike_counts.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 7,
-                        resource: layer1.next_activations.as_entire_binding(),
+                        resource: layer1.activations.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 8,
-                        resource: layer1.weights.as_entire_binding(),
+                        resource: layer1.next_activations.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 9,
-                        resource: layer1.next_weights.as_entire_binding(),
+                        resource: layer1.weights.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 10,
+                        resource: layer1.next_weights.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 11,
                         resource: layer1.weight_deltas.as_entire_binding(),
                     },
                 ],
@@ -189,23 +227,31 @@ impl VisionSNN {
                         resource: params_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: epsilon_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
                         binding: 6,
-                        resource: layer1.next_activations.as_entire_binding(),
+                        resource: spike_counts.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 7,
-                        resource: layer1.activations.as_entire_binding(),
+                        resource: layer1.next_activations.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 8,
-                        resource: layer1.next_weights.as_entire_binding(),
+                        resource: layer1.activations.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 9,
-                        resource: layer1.weights.as_entire_binding(),
+                        resource: layer1.next_weights.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 10,
+                        resource: layer1.weights.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 11,
                         resource: layer1.weight_deltas.as_entire_binding(),
                     },
                 ],
@@ -238,6 +284,7 @@ impl VisionSNN {
             preprocessing_layer,
             layer1,
             params_buf,
+            epsilon_pipeline,
             staging_output,
             staging_layer1_activations,
             staging_layer1_vertical_weights,
@@ -316,6 +363,11 @@ impl VisionSNN {
             pass.set_pipeline(&self.layer1.inference_pipeline);
             pass.set_bind_group(0, bind_group, &[]);
             pass.dispatch_workgroups(self.crop_size / 128, self.crop_size, 8);
+
+            // Update epsilon
+            pass.set_pipeline(&self.epsilon_pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
 
             // STDP pass
             pass.set_pipeline(&self.layer1.stdp_pipeline);
