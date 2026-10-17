@@ -214,7 +214,7 @@ fn inference(
     }
 }
 
-const ETA = 0.01;
+const ETA = 0.008;
 const PIXELS_PER_WORKGROUP = 256 * 32;
 
 @compute @workgroup_size(256, 1, 1)
