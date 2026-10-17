@@ -301,10 +301,7 @@ impl VisionSNN {
         &mut self,
         input_frame: &[u8],
         micro_ticks: u32,
-        retina_out: &mut [u8],
-        layer1_out: &mut [u8],
-        layer1_weights_out: &mut [u8],
-    ) {
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
         self.gpu_ctx.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.preprocessing_layer.input_frame_texture,
@@ -457,21 +454,21 @@ impl VisionSNN {
             spike_decoder::decode_activations(words, self.crop_size, self.crop_size, 8, 0).to_vec()
         };
 
-        let layer1_vertical_weights = {
+        let (off_weights, on_weights) = {
             let data = self
                 .staging_layer1_vertical_weights
                 .get_mapped_range(..)
                 .unwrap();
             let words: &[u8] = bytemuck::cast_slice(&data);
-            spike_decoder::decode_vertical_weights(words, 5, 5).to_vec()
+            let off_weights = spike_decoder::decode_vertical_weights(&words[0..25], 5, 5).to_vec();
+            let on_weights = spike_decoder::decode_vertical_weights(&words[25..], 5, 5).to_vec();
+            (off_weights, on_weights)
         };
 
         self.staging_output.unmap();
         self.staging_layer1_activations.unmap();
         self.staging_layer1_vertical_weights.unmap();
 
-        retina_out.copy_from_slice(&img);
-        layer1_out.copy_from_slice(&layer1_activations);
-        layer1_weights_out.copy_from_slice(&layer1_vertical_weights);
+        (img, layer1_activations, off_weights, on_weights)
     }
 }

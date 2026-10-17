@@ -43,7 +43,7 @@ while cap.isOpened():
     frame_rgba = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGBA)
 
     # 2. Step 10 GPU micro-ticks in Rust
-    (spike_bytes, activations, weights) = snn.run_micro_ticks(
+    (spike_bytes, activations, off_weights, on_weights) = snn.run_micro_ticks(
         frame_rgba.tobytes(), MICRO_TICKS_PER_FRAME
     )
 
@@ -54,7 +54,8 @@ while cap.isOpened():
     activations = np.frombuffer(activations, dtype=np.uint8).reshape(
         (CROP_SIZE, CROP_SIZE)
     )
-    weights = np.frombuffer(weights, dtype=np.uint8).reshape((5, 5))
+    off_weights = np.frombuffer(off_weights, dtype=np.uint8).reshape((5, 5))
+    on_weights = np.frombuffer(on_weights, dtype=np.uint8).reshape((5, 5))
 
     # 4. Calculate FPS
     fps_counter += 1
@@ -69,9 +70,17 @@ while cap.isOpened():
     debug_view = cv2.cvtColor(spike_img, cv2.COLOR_GRAY2BGR)
 
     activations_view = cv2.cvtColor(activations, cv2.COLOR_GRAY2BGR)
-    weights_view = cv2.cvtColor(weights, cv2.COLOR_GRAY2BGR)
-    weights_view = cv2.resize(
-        weights_view, (TILE_SIZE, TILE_SIZE), interpolation=cv2.INTER_NEAREST
+    off_weights_view = cv2.cvtColor(off_weights, cv2.COLOR_GRAY2BGR)
+    on_weights_view = cv2.cvtColor(on_weights, cv2.COLOR_GRAY2BGR)
+    off_weights_view = cv2.resize(
+        off_weights_view,
+        (TILE_SIZE // 2, TILE_SIZE // 2),
+        interpolation=cv2.INTER_NEAREST,
+    )
+    on_weights_view = cv2.resize(
+        on_weights_view,
+        (TILE_SIZE // 2, TILE_SIZE // 2),
+        interpolation=cv2.INTER_NEAREST,
     )
 
     # Display side-by-side: Live iPhone Feed | GPU Retina Spikes
@@ -85,7 +94,10 @@ while cap.isOpened():
     bottom_left = cv2.resize(
         activations_view, (TILE_SIZE, TILE_SIZE), interpolation=cv2.INTER_NEAREST
     )
-    bottom_right = weights_view
+    weights_view = np.hstack((off_weights_view, on_weights_view))
+    bottom_right = np.vstack(
+        (weights_view, np.zeros((TILE_SIZE // 2, TILE_SIZE, 3), dtype=np.uint8))
+    )
     bottom = np.hstack((bottom_left, bottom_right))
     combined = np.vstack((top, bottom))
     cv2.putText(

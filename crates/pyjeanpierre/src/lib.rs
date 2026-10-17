@@ -30,28 +30,24 @@ mod pyjeanpierre {
             Bound<'py, PyBytes>,
             Bound<'py, PyBytes>,
             Bound<'py, PyBytes>,
+            Bound<'py, PyBytes>,
         ) {
-            // 1. Allocate temporary vectors
-            let mut retina_out = vec![0u8; self.crop_size * self.crop_size];
-            let mut layer1_out = vec![0u8; self.crop_size * self.crop_size];
-            let mut layer1_weights_out = vec![0u8; 5 * 5];
-
-            // 2. Call your original function
-            self.inner.run_micro_ticks(
-                input_frame,
-                micro_ticks,
-                retina_out.as_mut(),
-                layer1_out.as_mut(),
-                layer1_weights_out.as_mut(),
-            );
+            let (retina_out, layer1_out, off_weights, on_weights) =
+                self.inner.run_micro_ticks(input_frame, micro_ticks);
 
             // 3. Convert the vectors into Python bytes objects (copies data)
             let retina_bytes = PyBytes::new(py, &retina_out);
             let layer1_bytes = PyBytes::new(py, &layer1_out);
-            let layer1_weights_bytes = PyBytes::new(py, &layer1_weights_out);
+            let off_weights_bytes = PyBytes::new(py, &off_weights);
+            let on_weights_bytes = PyBytes::new(py, &on_weights);
 
             // 4. Return as a Python tuple
-            (retina_bytes, layer1_bytes, layer1_weights_bytes)
+            (
+                retina_bytes,
+                layer1_bytes,
+                off_weights_bytes,
+                on_weights_bytes,
+            )
         }
     }
 }
