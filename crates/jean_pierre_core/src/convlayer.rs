@@ -84,7 +84,7 @@ impl ConvLayer {
         let mut rng = rand::rng();
         let range = Uniform::new(-20, 20).unwrap();
 
-        let vals: Vec<i8> = (0..(5 * 5 * 8 * 2)).map(|_| rng.sample(range)).collect();
+        let vals: Vec<i8> = (0..(5 * 5 * 2 * 8)).map(|_| rng.sample(range)).collect();
         // let mut vals: Vec<i8> = vec![0; 5 * 5 * 8 * 2];
         // vals[0..5].copy_from_slice(&[-54, -27, 0, 27, 54]);
         // vals[5..10].copy_from_slice(&[-54, -27, 0, 27, 54]);

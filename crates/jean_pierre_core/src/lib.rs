@@ -461,7 +461,7 @@ impl VisionSNN {
                 .unwrap();
             let words: &[u8] = bytemuck::cast_slice(&data);
             let off_weights = spike_decoder::decode_vertical_weights(&words[0..25], 5, 5).to_vec();
-            let on_weights = spike_decoder::decode_vertical_weights(&words[25..], 5, 5).to_vec();
+            let on_weights = spike_decoder::decode_vertical_weights(&words[28..], 5, 5).to_vec();
             (off_weights, on_weights)
         };
 
