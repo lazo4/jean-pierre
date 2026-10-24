@@ -8,3 +8,27 @@ contributions focused and clean (no low effort slop PR's).
 
 WARNING: This code is experimental and should not be used in production.
 
+## Usage
+
+### Prerequisites
+
+- [Rust](https://rustup.rs/)
+- [Python](https://www.python.org/) and [uv](https://docs.astral.sh/uv/getting-started/installation/)
+
+Clone the project:
+```
+git clone https://github.com/lazo4/jean-pierre.git
+```
+
+### Building
+
+First build the python bindings:
+```
+make dev
+```
+
+Then run one of the examples with:
+```
+uv run examples/[EXAMPLE].py
+```
+
