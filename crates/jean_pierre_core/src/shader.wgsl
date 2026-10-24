@@ -80,8 +80,8 @@ const DECAY: f32 = 0.0001;  // Smooth threshold decrease rate
 const SPIKE: f32 = 0.0019;  // 19 * DECAY -> 5% steady-state density
 const EPSILON_BASE: f32 = 0.015;
 
-const DECAY_1: f32 = 200;
-const SPIKE_1: f32 = 3800;
+const DECAY_1: f32 = 100;
+const SPIKE_1: f32 = 1900;
 const INFERENCE_EPSILON_BASE = 1;
 
 @compute @workgroup_size(1, 1, 1)
