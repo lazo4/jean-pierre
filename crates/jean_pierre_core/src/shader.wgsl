@@ -66,7 +66,7 @@ fn preprocess_frame(
     let prev_on = ((prev_word_on >> lane_id) & 1u) == 1u;
 
     let is_off = (diff < -off_epsilon) && !prev_off;
-    let is_on = diff > on_epsilon && !prev_on;
+    let is_on = (diff > on_epsilon) && !prev_on;
 
     let word_on = subgroupBallot(is_on).x;
     let word_off = subgroupBallot(is_off).x;
@@ -371,8 +371,8 @@ fn apply_stdp_deltas(
             let on_ltp = f32(atomicExchange(&layer1_vertical_deltas[on_idx], 0));
             let on_ltd = f32(atomicExchange(&layer1_vertical_deltas[on_idx + 1], 0));
 
-            let off_delta = (off_ltp * (127.0 - f32(off_weights[i])) / 127.0 * ETA) - (off_ltd * (128.0 + f32(off_weights[i])) / 128.0 * ETA);
-            let on_delta = (on_ltp * (127.0 - f32(on_weights[i])) / 127.0 * ETA) - (on_ltd * (128.0 + f32(on_weights[i])) / 128.0 * ETA);
+            let off_delta = (off_ltp * ETA) - (off_ltd * ETA);
+            let on_delta = (on_ltp * ETA) - (on_ltd * ETA);
 
             off_weights[i] = clamp(off_weights[i] + i32(f32(off_delta)), -128, 127);
             on_weights[i] = clamp(on_weights[i] + i32(f32(on_delta)), -128, 127);
