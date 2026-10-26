@@ -27,7 +27,7 @@ def center_crop_square(frame, target_size=CROP_SIZE):
 snn = VisionSNN(CROP_SIZE)
 
 # Continuity Camera capture (0 or 1 depending on built-in Mac webcam setup)
-cap = cv2.VideoCapture(1)
+cap = cv2.VideoCapture(0)
 
 fps_counter = 0
 last_time = time.time()
@@ -43,7 +43,7 @@ while cap.isOpened():
     frame_rgba = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGBA)
 
     # 2. Step 10 GPU micro-ticks in Rust
-    (spike_bytes, activations, off_weights, on_weights) = snn.run_micro_ticks(
+    (spike_bytes, activations_list, weights_list) = snn.run_micro_ticks(
         frame_rgba.tobytes(), MICRO_TICKS_PER_FRAME
     )
 
@@ -51,11 +51,14 @@ while cap.isOpened():
     spike_img = np.frombuffer(spike_bytes, dtype=np.uint8).reshape(
         (CROP_SIZE, CROP_SIZE)
     )
-    activations = np.frombuffer(activations, dtype=np.uint8).reshape(
-        (CROP_SIZE, CROP_SIZE)
-    )
-    off_weights = np.frombuffer(off_weights, dtype=np.uint8).reshape((5, 5))
-    on_weights = np.frombuffer(on_weights, dtype=np.uint8).reshape((5, 5))
+    activations_list = [
+        np.frombuffer(activation, dtype=np.uint8).reshape((CROP_SIZE, CROP_SIZE))
+        for activation in activations_list
+    ]
+    weights_list = [
+        np.frombuffer(weights, dtype=np.uint8).reshape((5, 5))
+        for weights in weights_list
+    ]
 
     # 4. Calculate FPS
     fps_counter += 1
@@ -69,19 +72,12 @@ while cap.isOpened():
     # 5. Draw live debug HUD on the output frame
     debug_view = cv2.cvtColor(spike_img, cv2.COLOR_GRAY2BGR)
 
-    activations_view = cv2.cvtColor(activations, cv2.COLOR_GRAY2BGR)
-    off_weights_view = cv2.cvtColor(off_weights, cv2.COLOR_GRAY2BGR)
-    on_weights_view = cv2.cvtColor(on_weights, cv2.COLOR_GRAY2BGR)
-    off_weights_view = cv2.resize(
-        off_weights_view,
-        (TILE_SIZE // 2, TILE_SIZE // 2),
-        interpolation=cv2.INTER_NEAREST,
-    )
-    on_weights_view = cv2.resize(
-        on_weights_view,
-        (TILE_SIZE // 2, TILE_SIZE // 2),
-        interpolation=cv2.INTER_NEAREST,
-    )
+    activations_views = [
+        cv2.cvtColor(activation, cv2.COLOR_GRAY2BGR) for activation in activations_list
+    ]
+    weights_views = [
+        cv2.cvtColor(weights, cv2.COLOR_GRAY2BGR) for weights in weights_list
+    ]
 
     # Display side-by-side: Live iPhone Feed | GPU Retina Spikes
     top_left = cv2.resize(
@@ -91,13 +87,37 @@ while cap.isOpened():
         debug_view, (TILE_SIZE, TILE_SIZE), interpolation=cv2.INTER_NEAREST
     )
     top = np.hstack((top_left, top_right))
-    bottom_left = cv2.resize(
-        activations_view, (TILE_SIZE, TILE_SIZE), interpolation=cv2.INTER_NEAREST
+
+    # Compute the activations grid
+    activations_resized = [
+        cv2.resize(activations_view, (64, 64), interpolation=cv2.INTER_NEAREST)
+        for activations_view in activations_views
+    ]
+    rows = []
+    for i in range(0, 8, 4):
+        # Grab the group of images that belong to the current row
+        row_images = activations_resized[i : i + 4]
+        # Concatenate horizontally
+        rows.append(cv2.hconcat(row_images))
+    bottom_left = cv2.vconcat(rows)
+
+    bottom_left = np.vstack(
+        (bottom_left, np.zeros((TILE_SIZE // 2, TILE_SIZE, 3), dtype=np.uint8))
     )
-    weights_view = np.hstack((off_weights_view, on_weights_view))
-    bottom_right = np.vstack(
-        (weights_view, np.zeros((TILE_SIZE // 2, TILE_SIZE, 3), dtype=np.uint8))
-    )
+
+    # Display the weights in a grid
+    weights_resized = [
+        cv2.resize(weights_view, (64, 64), interpolation=cv2.INTER_NEAREST)
+        for weights_view in weights_views
+    ]
+    rows = []
+    for i in range(0, 16, 4):
+        # Grab the group of images that belong to the current row
+        row_images = weights_resized[i : i + 4]
+        # Concatenate horizontally
+        rows.append(cv2.hconcat(row_images))
+    bottom_right = cv2.vconcat(rows)
+
     bottom = np.hstack((bottom_left, bottom_right))
     combined = np.vstack((top, bottom))
     cv2.putText(

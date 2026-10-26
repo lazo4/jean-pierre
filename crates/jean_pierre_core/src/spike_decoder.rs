@@ -57,12 +57,19 @@ pub fn decode_activations(
     img
 }
 
-pub fn decode_vertical_weights(words: &[u8], rows: u32, cols: u32) -> GrayImage {
+pub fn decode_vertical_weights(
+    words: &[u8],
+    rows: u32,
+    cols: u32,
+    on_weights: bool,
+    target_kernel: u32,
+) -> GrayImage {
     let mut img = GrayImage::new(rows, cols);
 
     for y in 0..rows {
         for x in 0..cols {
-            let index = (y * cols + x) as usize;
+            let index =
+                (((y * cols + x) + if on_weights { 28 } else { 0 }) + 56 * target_kernel) as usize;
             let weight = words[index] as i8;
             let pixel_val = (weight as i16 + 128) as u8;
             img.put_pixel(x, y, image::Luma([pixel_val]));

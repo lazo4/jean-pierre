@@ -28,26 +28,22 @@ mod pyjeanpierre {
             micro_ticks: u32,
         ) -> (
             Bound<'py, PyBytes>,
-            Bound<'py, PyBytes>,
-            Bound<'py, PyBytes>,
-            Bound<'py, PyBytes>,
+            Vec<Bound<'py, PyBytes>>,
+            Vec<Bound<'py, PyBytes>>,
         ) {
-            let (retina_out, layer1_out, off_weights, on_weights) =
+            let (retina_out, layer1_out, weights) =
                 self.inner.run_micro_ticks(input_frame, micro_ticks);
 
             // 3. Convert the vectors into Python bytes objects (copies data)
             let retina_bytes = PyBytes::new(py, &retina_out);
-            let layer1_bytes = PyBytes::new(py, &layer1_out);
-            let off_weights_bytes = PyBytes::new(py, &off_weights);
-            let on_weights_bytes = PyBytes::new(py, &on_weights);
+            let layer1_bytes = layer1_out
+                .iter()
+                .map(|out| PyBytes::new(py, &out))
+                .collect();
+            let weights_bytes = weights.iter().map(|k| PyBytes::new(py, &k)).collect();
 
             // 4. Return as a Python tuple
-            (
-                retina_bytes,
-                layer1_bytes,
-                off_weights_bytes,
-                on_weights_bytes,
-            )
+            (retina_bytes, layer1_bytes, weights_bytes)
         }
     }
 }

@@ -274,7 +274,7 @@ impl VisionSNN {
         let staging_layer1_vertical_weights =
             gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Staging Layer 1 Vertical Weights"),
-                size: (5 * 5 * 8 * 2) as u64, // 262,144 bytes
+                size: 4 * 7 * 2 * 8,
                 usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
                 mapped_at_creation: false,
             });
@@ -301,7 +301,7 @@ impl VisionSNN {
         &mut self,
         input_frame: &[u8],
         micro_ticks: u32,
-    ) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
+    ) -> (Vec<u8>, Vec<Vec<u8>>, Vec<Vec<u8>>) {
         self.gpu_ctx.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.preprocessing_layer.input_frame_texture,
@@ -451,24 +451,37 @@ impl VisionSNN {
                 .get_mapped_range(..)
                 .unwrap();
             let words: &[u32] = bytemuck::cast_slice(&data);
-            spike_decoder::decode_activations(words, self.crop_size, self.crop_size, 8, 0).to_vec()
+            (0..8)
+                .into_iter()
+                .map(|i| {
+                    spike_decoder::decode_activations(words, self.crop_size, self.crop_size, 8, i)
+                        .to_vec()
+                })
+                .collect()
         };
 
-        let (off_weights, on_weights) = {
+        let weights = {
             let data = self
                 .staging_layer1_vertical_weights
                 .get_mapped_range(..)
                 .unwrap();
             let words: &[u8] = bytemuck::cast_slice(&data);
-            let off_weights = spike_decoder::decode_vertical_weights(&words[0..25], 5, 5).to_vec();
-            let on_weights = spike_decoder::decode_vertical_weights(&words[28..], 5, 5).to_vec();
-            (off_weights, on_weights)
+            (0..8)
+                .into_iter()
+                .flat_map(|i| {
+                    [
+                        spike_decoder::decode_vertical_weights(words, 5, 5, false, i).to_vec(),
+                        spike_decoder::decode_vertical_weights(words, 5, 5, true, i).to_vec(),
+                    ]
+                    .into_iter()
+                })
+                .collect()
         };
 
         self.staging_output.unmap();
         self.staging_layer1_activations.unmap();
         self.staging_layer1_vertical_weights.unmap();
 
-        (img, layer1_activations, off_weights, on_weights)
+        (img, layer1_activations, weights)
     }
 }

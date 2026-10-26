@@ -75,8 +75,7 @@ impl ConvLayer {
 
         let weights = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Layer 1 Vertical Weights"),
-            // 2 input channels 8 rows, 8 columns, 8 kernels
-            size: 5 * 5 * 8 * 2,
+            size: 4 * 7 * 2 * 8,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
@@ -84,7 +83,7 @@ impl ConvLayer {
         let mut rng = rand::rng();
         let range = Uniform::new(-20, 20).unwrap();
 
-        let vals: Vec<i8> = (0..(5 * 5 * 2 * 8)).map(|_| rng.sample(range)).collect();
+        let vals: Vec<i8> = (0..(4 * 7 * 2 * 8)).map(|_| rng.sample(range)).collect();
         // let mut vals: Vec<i8> = vec![0; 5 * 5 * 8 * 2];
         // vals[0..5].copy_from_slice(&[-54, -27, 0, 27, 54]);
         // vals[5..10].copy_from_slice(&[-54, -27, 0, 27, 54]);
@@ -97,8 +96,7 @@ impl ConvLayer {
 
         let next_weights = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Layer 1 Next Vertical Weights"),
-            // 5 rows, 5 columns 8 kernels, 2 input channels
-            size: 5 * 5 * 8 * 2,
+            size: 4 * 7 * 2 * 8,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
