@@ -110,14 +110,14 @@ impl VisionSNN {
 
         let spike_counts = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Spike Counts Buffer"),
-            size: 4 * 2,
+            size: 4 * 9,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let epsilon_buf = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Epsilon Buffer"),
-            size: 2 * 4,
+            size: 4 * 9,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });

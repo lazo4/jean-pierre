@@ -89,8 +89,8 @@ const DECAY: f32 = 0.0001;  // Smooth threshold decrease rate
 const SPIKE: f32 = 0.0019;  // 19 * DECAY -> 5% steady-state density
 const EPSILON_BASE: f32 = 0.015;
 
-const DECAY_1: f32 = 100;
-const SPIKE_1: f32 = 1900;
+const DECAY_1: f32 = 50;
+const SPIKE_1: f32 = 950;
 const INFERENCE_EPSILON_BASE = 1;
 
 @compute @workgroup_size(1, 1, 1)
@@ -107,13 +107,16 @@ fn update_epsilon() {
     // Update GPU epsilon directly
     epsilon[0] = max(epsilon[0] + delta, EPSILON_BASE);
 
-    let total_spikes_1 = atomicExchange(&spike_counts[1], 0u);
-    let spike_rate_1 = f32(total_spikes_1) / f32(128 * 128 * 8);
-    let zero_rate_1 = 1.0 - spike_rate_1;
+    for (var i = 1u; i < 9; i++) {
 
-    let delta_1 = (spike_rate_1 * SPIKE_1) - (zero_rate_1 * DECAY_1);
-    // Update GPU epsilon directly
-    epsilon[1] = max(epsilon[1] + delta_1, INFERENCE_EPSILON_BASE);
+        let total_spikes_1 = atomicExchange(&spike_counts[i], 0u);
+        let spike_rate_1 = f32(total_spikes_1) / f32(128 * 128 * 1);
+        let zero_rate_1 = 1.0 - spike_rate_1;
+
+        let delta_1 = (spike_rate_1 * SPIKE_1) - (zero_rate_1 * DECAY_1);
+        // Update GPU epsilon directly
+        epsilon[i] = max(epsilon[i] + delta_1, INFERENCE_EPSILON_BASE);
+    }
 }
 
 // Activations for layer 1
@@ -237,7 +240,7 @@ fn inference(
     let prev_word = layer1_activations[word_index + global_id.z];
     let prev_activation = ((prev_word >> lane_id) & 1u) == 1u;
 
-    let activations = subgroupBallot((f32(accum) > epsilon[1]) && !prev_activation).x;
+    let activations = subgroupBallot((f32(accum) > epsilon[global_id.z + 1]) && !prev_activation).x;
     if lane_id == 0u {
         let words_per_row = params.width / 32u;
         let row_offset = global_id.x / 32u;
@@ -246,7 +249,7 @@ fn inference(
 
         let spike_count = countOneBits(activations);
         if spike_count > 0u {
-            atomicAdd(&spike_counts[1], spike_count);
+            atomicAdd(&spike_counts[global_id.z + 1], spike_count);
         }
     }
 }
