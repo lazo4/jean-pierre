@@ -369,12 +369,12 @@ impl VisionSNN {
             // STDP pass
             pass.set_pipeline(&self.layer1.stdp_pipeline);
             pass.set_bind_group(0, bind_group, &[]);
-            pass.dispatch_workgroups(1, 8192 / self.crop_size, 1);
+            pass.dispatch_workgroups(1, 8192 / self.crop_size, 8);
 
             // Apply Deltas
             pass.set_pipeline(&self.layer1.apply_stdp_deltas_pipeline);
             pass.set_bind_group(0, bind_group, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
+            pass.dispatch_workgroups(1, 1, 8);
 
             drop(pass);
 

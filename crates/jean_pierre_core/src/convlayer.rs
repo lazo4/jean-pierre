@@ -103,7 +103,7 @@ impl ConvLayer {
 
         let weight_deltas = gpu_ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Layer 1 Vertical Deltas"),
-            size: 5 * 5 * 8 * 2 * 4, // 5 rows, 5 columns, 8 kernels, 4 bytes per delta
+            size: 4 * 7 * 2 * 2 * 8 * 4,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });

@@ -108,7 +108,7 @@ fn update_epsilon() {
     epsilon[0] = max(epsilon[0] + delta, EPSILON_BASE);
 
     let total_spikes_1 = atomicExchange(&spike_counts[1], 0u);
-    let spike_rate_1 = f32(total_spikes_1) / f32(128 * 128 * 1);
+    let spike_rate_1 = f32(total_spikes_1) / f32(128 * 128 * 8);
     let zero_rate_1 = 1.0 - spike_rate_1;
 
     let delta_1 = (spike_rate_1 * SPIKE_1) - (zero_rate_1 * DECAY_1);
@@ -124,8 +124,8 @@ fn update_epsilon() {
 @group(0) @binding(11) var<storage, read_write> layer1_vertical_deltas: array<atomic<i32>>;
 
 // TODO: Process weights 4 at a time!!
-fn get_weight(idx: u32, is_on: bool) -> i32 {
-    let word_idx = (idx / 4u) + u32(is_on) * 7;
+fn get_weight(idx: u32, is_on: bool, kernel: u32) -> i32 {
+    let word_idx = ((idx / 4u) + u32(is_on) * 7) + kernel * 14;
     let word = layer1_vertical_weights[word_idx];
     let weightvec = unpack4xI8(word);
     return weightvec[idx % 4u];
@@ -219,16 +219,16 @@ fn inference(
 
         // 4. Conditional accumulation via WGSL select() (no branching)
         let w_base = u32(ry + 2) * 5u;
-        accum += select(0, get_weight(w_base + 0u, false), off_m2);
-        accum += select(0, get_weight(w_base + 0u, true), on_m2);
-        accum += select(0, get_weight(w_base + 1u, false), off_m1);
-        accum += select(0, get_weight(w_base + 1u, true), on_m1);
-        accum += select(0, get_weight(w_base + 2u, false), off_p0);
-        accum += select(0, get_weight(w_base + 2u, true), on_p0);
-        accum += select(0, get_weight(w_base + 3u, false), off_p1);
-        accum += select(0, get_weight(w_base + 3u, true), on_p1);
-        accum += select(0, get_weight(w_base + 4u, false), off_p2);
-        accum += select(0, get_weight(w_base + 4u, true), on_p2);
+        accum += select(0, get_weight(w_base + 0u, false, global_id.z), off_m2);
+        accum += select(0, get_weight(w_base + 0u, true, global_id.z), on_m2);
+        accum += select(0, get_weight(w_base + 1u, false, global_id.z), off_m1);
+        accum += select(0, get_weight(w_base + 1u, true, global_id.z), on_m1);
+        accum += select(0, get_weight(w_base + 2u, false, global_id.z), off_p0);
+        accum += select(0, get_weight(w_base + 2u, true, global_id.z), on_p0);
+        accum += select(0, get_weight(w_base + 3u, false, global_id.z), off_p1);
+        accum += select(0, get_weight(w_base + 3u, true, global_id.z), on_p1);
+        accum += select(0, get_weight(w_base + 4u, false, global_id.z), off_p2);
+        accum += select(0, get_weight(w_base + 4u, true, global_id.z), on_p2);
     }
 
     // Threshold the sum and write the result
@@ -251,7 +251,7 @@ fn inference(
     }
 }
 
-const ETA = 0.02;
+const ETA = 0.01;
 const PIXELS_PER_WORKGROUP = 256 * 32;
 
 @compute @workgroup_size(256, 1, 1)
@@ -310,8 +310,8 @@ fn compute_stdp_deltas(
         }
 
         for (var rx = -2; rx <= 2; rx++) {
-            let off_weight_idx = (u32(ry + 2) * 5u + u32(rx + 2)) * 2u;
-            let on_weight_idx = (u32(ry + 2) * 5u + u32(rx + 2) + 25) * 2u;
+            let off_weight_idx = ((u32(ry + 2) * 5u + u32(rx + 2)) * 2u) + 100 * global_id.z;
+            let on_weight_idx = ((u32(ry + 2) * 5u + u32(rx + 2) + 25) * 2u) + 100 * global_id.z;
 
             // --- Bit-Align Presynaptic Window for Offset rx ---
             var off_presyn: u32;
@@ -358,14 +358,15 @@ fn compute_stdp_deltas(
 fn apply_stdp_deltas(
     @builtin(global_invocation_id) global_id: vec3u,
 ) {
-    let weight_idx = global_id.x;
+    let weight_idx = (global_id.x) + 14 * global_id.z;
     var off_weights = unpack4xI8(layer1_vertical_weights[weight_idx]);
     var on_weights = unpack4xI8(layer1_vertical_weights[weight_idx + 7]);
 
     for (var i = 0u; i < 4u; i++) {
-        let off_idx = (weight_idx * 4u + i) * 2u;
-        let on_idx = (weight_idx * 4u + i + 25) * 2u;
-        if off_idx < 50u {
+        let pos = global_id.x * 4 + i;
+        if pos < 25u {
+            let off_idx = pos * 2u + 100u * global_id.z;
+            let on_idx = (pos + 25u) * 2u + 100u * global_id.z;
             let off_ltp = f32(atomicExchange(&layer1_vertical_deltas[off_idx], 0));
             let off_ltd = f32(atomicExchange(&layer1_vertical_deltas[off_idx + 1], 0));
             let on_ltp = f32(atomicExchange(&layer1_vertical_deltas[on_idx], 0));
